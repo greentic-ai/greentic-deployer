@@ -1,0 +1,17 @@
+id: acme-messaging
+title: ACME Multi-Channel Demo
+type: messaging
+start: welcome
+
+nodes:
+  welcome:
+    qa.process:
+      welcome: "مرحبا!"
+    routing:
+      - to: send_template
+
+  send_template:
+    templating.handlebars:
+      text: "{{in.payload.text}} → delivered to telemetry and channels."
+    routing:
+      - out: true

@@ -1,0 +1,58 @@
+{
+  "meta": {
+    "pack_id": "greentic.acme",
+    "version": "0.1.0",
+    "name": "ACME Pack",
+    "description": "Demo pack for the acme tenant.",
+    "authors": ["Greentic AI"],
+    "license": "MIT",
+    "imports": [
+      {
+        "pack_id": "secrets.get",
+        "version_req": ">=0.3"
+      },
+      {
+        "pack_id": "telemetry.emit",
+        "version_req": ">=0.2"
+      }
+    ],
+    "entry_flows": ["acme-messaging"],
+    "created_at_utc": "2025-01-01T00:00:00Z",
+    "annotations": {
+      "greentic.secrets": {
+        "SLACK_BOT_TOKEN": "Slack bot token for the Zain tenant",
+        "TEAMS_CLIENT_SECRET": "Teams client secret placeholder"
+      },
+      "greentic.oauth": {
+        "slack": {
+          "scopes": ["chat:write", "commands"]
+        },
+        "microsoft": {
+          "scopes": ["User.Read"]
+        }
+      }
+    }
+  },
+    "flows": [
+    {
+      "id": "acme-messaging",
+      "kind": "messaging",
+      "entry": "welcome",
+      "file_yaml": "flows/acme-messaging/flow.yaml",
+      "file_json": "flows/acme-messaging/flow.json",
+      "hash_blake3": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "components": [
+    {
+      "name": "qa.process",
+      "version": "0.1.0",
+      "file_wasm": "components/qa/process/component.wasm",
+      "hash_blake3": "0000000000000000000000000000000000000000000000000000000000000000",
+      "schema_file": null,
+      "manifest_file": null,
+      "world": null,
+      "capabilities": null
+    }
+  ]
+}
