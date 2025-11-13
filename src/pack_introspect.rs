@@ -109,6 +109,7 @@ fn read_manifest_from_directory(root: &Path) -> Result<PackManifest> {
 mod tests {
     use super::*;
     use crate::config::{Action, DeployerConfig, Provider};
+    use crate::iac::IaCTool;
     use std::path::PathBuf;
 
     #[test]
@@ -121,6 +122,8 @@ mod tests {
             pack_path: PathBuf::from("examples/acme-pack"),
             yes: true,
             preview: false,
+            dry_run: false,
+            iac_tool: IaCTool::Terraform,
         };
 
         let plan = build_plan(&config).expect("should build plan");

@@ -2,8 +2,10 @@ use std::env;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{DeployerError, Result};
+use crate::iac::{IaCTool, IacToolArg, resolve_iac_tool};
 
 /// Available CLI actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +26,7 @@ impl Action {
 }
 
 /// Supported cloud providers.
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Provider {
     Aws,
     Azure,
@@ -67,6 +69,14 @@ pub struct ActionArgs {
     /// Treat the operation as a preview/dry-run.
     #[arg(long, default_value_t = false)]
     pub preview: bool,
+
+    /// Generate IaC artifacts but do not execute them.
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
+
+    /// IaC tool to use (tf/terraform or tofu/opentofu).
+    #[arg(long, value_enum)]
+    pub iac_tool: Option<IacToolArg>,
 }
 
 /// Top-level CLI structure.
@@ -74,7 +84,8 @@ pub struct ActionArgs {
 #[command(
     name = "greentic-deployer",
     version,
-    about = "Automated multi-cloud deployment engine for Greentic packs."
+    about = "Automated multi-cloud deployment engine for Greentic packs.",
+    long_about = "Choose Terraform or OpenTofu via --iac-tool or GREENTIC_IAC_TOOL, or rely on PATH auto-detection (tofu takes precedence). Apply/destroy commands run terraform/tofu init/plan/apply or init/destroy inside deploy/<provider>/<tenant>/<env>."
 )]
 pub struct CliArgs {
     #[command(subcommand)]
@@ -101,6 +112,8 @@ pub struct DeployerConfig {
     pub pack_path: PathBuf,
     pub yes: bool,
     pub preview: bool,
+    pub dry_run: bool,
+    pub iac_tool: IaCTool,
 }
 
 impl DeployerConfig {
@@ -123,6 +136,8 @@ impl DeployerConfig {
             )));
         }
 
+        let iac_tool = resolve_iac_tool(args.iac_tool, env::var("GREENTIC_IAC_TOOL").ok())?;
+
         Ok(Self {
             action,
             provider: args.provider,
@@ -131,6 +146,8 @@ impl DeployerConfig {
             pack_path: args.pack,
             yes: args.yes,
             preview: args.preview,
+            dry_run: args.dry_run,
+            iac_tool,
         })
     }
 }
@@ -139,7 +156,6 @@ impl DeployerConfig {
 mod tests {
     use super::*;
     use std::env;
-
     fn base_args() -> Vec<&'static str> {
         vec![
             "greentic-deployer",

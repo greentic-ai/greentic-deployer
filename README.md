@@ -18,7 +18,8 @@ cargo build -p greentic-deployer
 
 ```
 greentic-deployer <plan|apply|destroy> --provider <aws|azure|gcp> \
-  --tenant <tenant-id> --environment <env> --pack <path> [--yes] [--preview]
+  --tenant <tenant-id> --environment <env> --pack <path> \
+  [--yes] [--preview] [--dry-run] [--iac-tool <tf|terraform|tofu|opentofu>]
 ```
 
 Examples:
@@ -43,6 +44,7 @@ Plans and provider artifacts are written to `deploy/<provider>/<tenant>/<environ
 - `GREENTIC_ENV` sets the default environment (defaults to `dev`).
 - `GREENTIC_BASE_DOMAIN` controls the base domain used when emitting OAuth redirect URLs (defaults to `deploy.greentic.ai`).
 - OTLP tracing is wired via `GREENTIC_OTLP_ENDPOINT` or standard `OTEL_EXPORTER_OTLP_ENDPOINT`.
+- `GREENTIC_IAC_TOOL` overrides the IaC tool used when running `apply`/`destroy`. Accepts `tf`/`terraform` or `tofu`/`opentofu`. When unset the deployer prefers `tofu` (if available), falls back to `terraform`, and execution fails later if the binary is absent.
 
 ## Secrets & OAuth
 
@@ -77,9 +79,30 @@ deploy/aws/acme/staging/plan.json
 
 The plan also logs telemetry via `greentic-telemetry` so operations are traceable across plan/apply/destroy.
 
+## Terraform & OpenTofu
+
+- `greentic-deployer` writes provider artifacts under `deploy/<provider>/<tenant>/<environment>/` and then runs the chosen IaC tool inside that directory.
+- The CLI accepts `--iac-tool tf|terraform` or `--iac-tool tofu|opentofu`, or you can set `GREENTIC_IAC_TOOL`. When neither flag nor env var is provided the deployer tries to auto-detect by looking for `tofu` first, then `terraform`; if neither binary exists the commands will fail later with a clear error describing the missing tool.
+- Apply runs: `tool init -input=false`, `tool plan -input=false -out=plan.tfplan`, `tool apply -input=false -auto-approve plan.tfplan`. Destroy runs: `tool init -input=false` then `tool destroy -input=false -auto-approve`.
+- Use `--dry-run` to print the commands that would run without executing them (this also skips the secret push/apply/destroy cycles). The commands are also logged whenever `--preview` is used.
+- Apply/destroy still rely on user-provided cloud credentials and backend configuration; we report failures faithfully when the tool exits non-zero.
+
+## Try the acme pack
+
+1. Generate a plan against the sample pack:
+   ```bash
+   cargo run -p greentic-deployer -- plan --provider aws --tenant acme --environment staging --pack examples/acme-pack
+   ```
+2. Inspect `deploy/aws/acme/staging/` (and the matching `azure`/`gcp` roots) for:
+   - `main.tf`, `variables.tf`, `plan.json` (AWS).
+   - `main.bicep`, `parameters.json`, `plan.json` (Azure).
+   - `main.yaml`, `parameters.yaml`, `plan.json` (GCP).
+3. After running `apply`/`destroy`, check `apply-manifest.json`/`destroy-manifest.json` to see the secrets, OAuth redirect URLs, telemetry attributes, and provider targets that were recorded for that action in each vendor directory (apply now also pushes the resolved secrets into AWS Secrets Manager/Azure Key Vault/GCP Secret Manager via `greentic-secrets`).
+4. Each generated file embeds NATS/runner bindings, telemetry env vars, and annotated secrets/OAuth URLs so you can review before applying.
+5. To apply the infrastructure you can run `terraform init && terraform apply` under that directory (or hydrate the Bicep/YAML with your own deploy tooling) after wiring the secret identifiers via `greentic-secrets`. Run `greentic-deployer apply`/`destroy` with `--dry-run` or `--preview` to print the exact Terraform/OpenTofu commands without touching cloud resources.
+
 ## Next Steps
 
-1. Replace the stub provider backends with Terraform/Pulumi template generation and apply logic.
-2. Wire secrets into AWS Secrets Manager, Azure Key Vault, and GCP Secret Manager during `apply`.
-3. Extend introspection to hydrate runner bindings, channel-specific ingress routes, and real OAuth registration helpers.
-4. Add end-to-end tests against real Greentic packs and provider mocks.
+1. Expand the end-to-end tests to cover the full apply/destroy cycle per provider so we can verify secrets, OAuth, telemetry, and runners live beyond the mock runner.
+2. Document how to re-run the generated Terraform/Bicep/YAML artifacts in the cloud once IaC commands succeed and secrets are stored.
+3. Add a provider-level smoke test that runs `greentic-deployer apply`/`destroy` with `--dry-run` inside CI to ensure `iac-tool` detection and command generation keeps working.

@@ -3,6 +3,7 @@
 pub mod apply;
 pub mod config;
 pub mod error;
+pub mod iac;
 pub mod pack_introspect;
 pub mod plan;
 pub mod providers;
@@ -15,4 +16,4 @@ pub use plan::{
     ChannelServicePlan, DeploymentPlan, FlowSummary, MessagingPlan, OAuthClientSpec,
     RunnerServicePlan, SecretSpec, TelemetryPlan,
 };
-pub use providers::{ProviderArtifact, ProviderArtifacts, ProviderBackend};
+pub use providers::{GeneratedFile, ProviderArtifacts, ProviderBackend};
