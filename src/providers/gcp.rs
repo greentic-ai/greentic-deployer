@@ -199,19 +199,17 @@ impl ProviderBackend for GcpBackend {
         let parameters = self.render_parameters_yaml();
         let plan_json = serde_json::to_string_pretty(&self.plan)?;
 
-        Ok(
-            ProviderArtifacts::named(
-                Provider::Gcp,
-                format!(
-                    "GCP deployment for tenant {} in {}",
-                    self.config.tenant, self.config.environment
-                ),
-                self.plan.clone(),
-            )
-            .with_file("master.yaml", yaml)
-            .with_file("parameters.yaml", parameters)
-            .with_file("plan.json", plan_json),
+        Ok(ProviderArtifacts::named(
+            Provider::Gcp,
+            format!(
+                "GCP deployment for tenant {} in {}",
+                self.config.tenant, self.config.environment
+            ),
+            self.plan.clone(),
         )
+        .with_file("master.yaml", yaml)
+        .with_file("parameters.yaml", parameters)
+        .with_file("plan.json", plan_json))
     }
 
     async fn apply(&self, artifacts: &ProviderArtifacts, secrets: &[ResolvedSecret]) -> Result<()> {

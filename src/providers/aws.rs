@@ -322,19 +322,17 @@ impl ProviderBackend for AwsBackend {
         let variables_tf = self.render_variables_tf();
         let plan_json = serde_json::to_string_pretty(&self.plan)?;
 
-        Ok(
-            ProviderArtifacts::named(
-                Provider::Aws,
-                format!(
-                    "AWS deployment for tenant {} in {}",
-                    self.config.tenant, self.config.environment
-                ),
-                self.plan.clone(),
-            )
-            .with_file("master.tf", main_tf)
-            .with_file("variables.tf", variables_tf)
-            .with_file("plan.json", plan_json),
+        Ok(ProviderArtifacts::named(
+            Provider::Aws,
+            format!(
+                "AWS deployment for tenant {} in {}",
+                self.config.tenant, self.config.environment
+            ),
+            self.plan.clone(),
         )
+        .with_file("master.tf", main_tf)
+        .with_file("variables.tf", variables_tf)
+        .with_file("plan.json", plan_json))
     }
 
     async fn apply(&self, artifacts: &ProviderArtifacts, secrets: &[ResolvedSecret]) -> Result<()> {
