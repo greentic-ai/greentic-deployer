@@ -54,8 +54,14 @@ impl ProviderBackend for AzureBackend {
                 self.config.tenant, self.config.environment
             ),
         )
+<<<<<<< Updated upstream
         .with_artifact("deploy/main.bicep", bicep)
         .with_artifact("deploy/plan.json", plan_json);
+=======
+        .with_file("azure/master.bicep", bicep)
+        .with_file("azure/parameters.json", parameters)
+        .with_file("azure/plan.json", plan_json);
+>>>>>>> Stashed changes
 
         Ok(artifacts)
     }

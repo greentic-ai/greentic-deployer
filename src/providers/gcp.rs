@@ -56,8 +56,14 @@ impl ProviderBackend for GcpBackend {
                 self.config.tenant, self.config.environment
             ),
         )
+<<<<<<< Updated upstream
         .with_artifact("deploy/main.yaml", yaml)
         .with_artifact("deploy/plan.json", plan_json);
+=======
+        .with_file("gcp/master.yaml", yaml)
+        .with_file("gcp/parameters.yaml", parameters)
+        .with_file("gcp/plan.json", plan_json);
+>>>>>>> Stashed changes
 
         Ok(artifacts)
     }

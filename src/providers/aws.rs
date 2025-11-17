@@ -106,8 +106,14 @@ impl ProviderBackend for AwsBackend {
                 self.config.tenant, self.config.environment
             ),
         )
+<<<<<<< Updated upstream
         .with_artifact("deploy/main.tf", terraform)
         .with_artifact("deploy/plan.json", plan_json);
+=======
+        .with_file("aws/master.tf", main_tf)
+        .with_file("aws/variables.tf", variables_tf)
+        .with_file("aws/plan.json", plan_json);
+>>>>>>> Stashed changes
 
         Ok(artifacts)
     }
