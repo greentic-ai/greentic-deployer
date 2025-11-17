@@ -8,18 +8,19 @@ use tracing::info;
 
 use crate::config::{DeployerConfig, Provider};
 use crate::error::Result;
-use crate::plan::{DeploymentPlan, RunnerServicePlan, SecretSpec};
+use crate::plan::{PlanContext, SecretContext};
 use crate::providers::{ApplyManifest, ProviderArtifacts, ProviderBackend, ResolvedSecret};
+use greentic_types::deployment::RunnerPlan;
 
 /// Azure-specific backend stub.
 #[derive(Clone)]
 pub struct AzureBackend {
     config: DeployerConfig,
-    plan: DeploymentPlan,
+    plan: PlanContext,
 }
 
 impl AzureBackend {
-    pub fn new(config: DeployerConfig, plan: DeploymentPlan) -> Self {
+    pub fn new(config: DeployerConfig, plan: PlanContext) -> Self {
         Self { config, plan }
     }
 
@@ -52,7 +53,7 @@ impl AzureBackend {
         writeln!(
             &mut body,
             "param natsAdminUrl string = '{}'",
-            Self::bicep_escape(&self.plan.messaging.nats.admin_url)
+            Self::bicep_escape(&self.plan.messaging.admin_url)
         )
         .ok();
         writeln!(&mut body, "param secretPaths object = {{}}").ok();
@@ -68,10 +69,10 @@ impl AzureBackend {
         )
         .ok();
 
-        if self.plan.runners.is_empty() {
+        if self.plan.plan.runners.is_empty() {
             writeln!(&mut body, "\n// No runners were inferred from the pack.").ok();
         } else {
-            for runner in &self.plan.runners {
+            for runner in &self.plan.plan.runners {
                 let resource = format!("runner{}", Self::sanitize_name(&runner.name));
                 let env_block = self.azure_env_entries(runner).join("\n");
                 let secrets_block = if self.plan.secrets.is_empty() {
@@ -82,7 +83,7 @@ impl AzureBackend {
                     for spec in &self.plan.secrets {
                         secrets.push_str(&format!(
                             "        {{ name: '{}', value: secretPaths['{}'] }}\n",
-                            spec.name, spec.name
+                            spec.key, spec.key
                         ));
                     }
                     secrets.push_str("      ]\n");
@@ -146,7 +147,7 @@ impl AzureBackend {
         );
         parameters.insert(
             "natsAdminUrl".to_string(),
-            json!({ "value": self.plan.messaging.nats.admin_url }),
+            json!({ "value": self.plan.messaging.admin_url }),
         );
 
         let secret_map = self.secret_paths_map();
@@ -164,19 +165,19 @@ impl AzureBackend {
     fn secret_paths_map(&self) -> serde_json::Map<String, serde_json::Value> {
         let mut secrets = serde_json::Map::new();
         for spec in &self.plan.secrets {
-            secrets.insert(spec.name.clone(), json!(self.secret_reference_path(spec)));
+            secrets.insert(spec.key.clone(), json!(self.secret_reference_path(spec)));
         }
         secrets
     }
 
-    fn secret_reference_path(&self, spec: &SecretSpec) -> String {
+    fn secret_reference_path(&self, spec: &SecretContext) -> String {
         format!(
             "@sec:greentic/{}/{}/{}",
-            self.config.tenant, self.config.environment, spec.name
+            self.config.tenant, self.config.environment, spec.key
         )
     }
 
-    fn azure_env_entries(&self, runner: &RunnerServicePlan) -> Vec<String> {
+    fn azure_env_entries(&self, _runner: &RunnerPlan) -> Vec<String> {
         let mut entries = Vec::new();
         entries.push("          { name: 'NATS_URL', value: natsAdminUrl }".to_string());
         entries.push(
@@ -191,18 +192,10 @@ impl AzureBackend {
             ));
         }
 
-        for binding in &runner.bindings {
-            entries.push(format!(
-                "          {{ name: '{}', value: '{}' }}",
-                binding.name,
-                Self::bicep_escape(&binding.detail)
-            ));
-        }
-
         for spec in &self.plan.secrets {
             entries.push(format!(
                 "          {{ name: '{}', secretRef: '{}' }}",
-                spec.name, spec.name
+                spec.key, spec.key
             ));
         }
 
@@ -216,16 +209,11 @@ impl AzureBackend {
         let mut block = String::new();
         writeln!(&mut block, "\n// Channel ingress endpoints").ok();
         for channel in &self.plan.channels {
-            let ingress = channel
-                .ingress
-                .iter()
-                .map(|endpoint| endpoint.url.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let ingress = channel.ingress.join(", ");
             writeln!(
                 &mut block,
                 "// - {} (type = {}, oauth_required = {})",
-                channel.name, channel.channel_type, channel.oauth_required
+                channel.name, channel.kind, channel.oauth_required
             )
             .ok();
             writeln!(&mut block, "//   ingress: {}", ingress).ok();
@@ -234,15 +222,18 @@ impl AzureBackend {
     }
 
     fn oauth_comments(&self) -> String {
-        if self.plan.oauth_clients.is_empty() {
+        if self.plan.plan.oauth.is_empty() {
             return String::new();
         }
         let mut block = String::new();
         writeln!(&mut block, "\n// OAuth redirect URLs").ok();
-        for client in &self.plan.oauth_clients {
-            for url in &client.redirect_urls {
-                writeln!(&mut block, "// - {} ({})", url, client.provider.as_str()).ok();
-            }
+        for client in &self.plan.plan.oauth {
+            writeln!(
+                &mut block,
+                "// - /oauth/{}/callback -> {}",
+                client.provider_id, client.redirect_path
+            )
+            .ok();
         }
         block
     }

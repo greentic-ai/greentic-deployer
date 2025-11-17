@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{DeployerConfig, Provider};
 use crate::error::Result;
-use crate::plan::{DeploymentPlan, SecretSpec};
+use crate::plan::{PlanContext, SecretContext};
 
 pub mod aws;
 pub mod azure;
@@ -26,7 +26,7 @@ pub struct GeneratedFile {
 /// Resolved secret metadata emitted during apply/destroy.
 #[derive(Debug, Clone)]
 pub struct ResolvedSecret {
-    pub spec: SecretSpec,
+    pub spec: SecretContext,
     pub value: String,
     pub provider_path: String,
 }
@@ -42,12 +42,12 @@ impl ResolvedSecret {
 pub struct ProviderArtifacts {
     pub provider: Provider,
     pub description: String,
-    pub plan: DeploymentPlan,
+    pub plan: PlanContext,
     pub files: Vec<GeneratedFile>,
 }
 
 impl ProviderArtifacts {
-    pub fn new(provider: Provider, description: String, plan: DeploymentPlan) -> Self {
+    pub fn new(provider: Provider, description: String, plan: PlanContext) -> Self {
         Self {
             provider,
             description,
@@ -56,7 +56,7 @@ impl ProviderArtifacts {
         }
     }
 
-    pub fn named(provider: Provider, description: String, plan: DeploymentPlan) -> Self {
+    pub fn named(provider: Provider, description: String, plan: PlanContext) -> Self {
         Self::new(provider, description, plan)
     }
 
@@ -89,7 +89,7 @@ pub struct ApplySecret {
     pub logical_name: String,
     pub provider_path: String,
     pub value_length: usize,
-    pub required_for: Vec<String>,
+    pub scope: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,20 +116,21 @@ impl ApplyManifest {
         let secret_entries = secrets
             .iter()
             .map(|entry| ApplySecret {
-                logical_name: entry.spec.name.clone(),
+                logical_name: entry.spec.key.clone(),
                 provider_path: entry.provider_path.clone(),
                 value_length: entry.value_len(),
-                required_for: entry.spec.required_for.clone(),
+                scope: entry.spec.scope.clone(),
             })
             .collect();
 
         let oauth_clients = plan
-            .oauth_clients
+            .plan
+            .oauth
             .iter()
             .map(|client| ApplyOAuthClient {
-                provider: client.provider.as_str().to_string(),
-                scopes: client.scopes.clone(),
-                redirect_urls: client.redirect_urls.clone(),
+                provider: client.provider_id.clone(),
+                scopes: Vec::new(),
+                redirect_urls: vec![client.redirect_path.clone()],
             })
             .collect();
 
@@ -149,8 +150,8 @@ impl ApplyManifest {
             provider: config.provider,
             tenant: config.tenant.clone(),
             environment: config.environment.clone(),
-            pack_id: plan.pack_id.clone(),
-            pack_version: plan.pack_version.clone(),
+            pack_id: plan.plan.pack_id.clone(),
+            pack_version: plan.plan.pack_version.to_string(),
             secrets: secret_entries,
             oauth_clients,
             telemetry,
@@ -175,7 +176,7 @@ pub trait ProviderBackend: Send + Sync {
 pub fn create_backend(
     provider: Provider,
     config: &crate::config::DeployerConfig,
-    plan: &DeploymentPlan,
+    plan: &PlanContext,
 ) -> Result<Box<dyn ProviderBackend>> {
     match provider {
         Provider::Aws => Ok(Box::new(AwsBackend::new(config.clone(), plan.clone()))),

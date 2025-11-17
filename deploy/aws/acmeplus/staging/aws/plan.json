@@ -1,0 +1,181 @@
+{
+  "plan": {
+    "pack_id": "greentic.acme.plus",
+    "pack_version": "0.2.0",
+    "tenant": "acmeplus",
+    "environment": "staging",
+    "runners": [
+      {
+        "name": "greentic.acme.plus-runner",
+        "replicas": 1,
+        "capabilities": {
+          "flows": [
+            "support-chat",
+            "ops-alerts"
+          ]
+        }
+      }
+    ],
+    "messaging": {
+      "logical_cluster": "default",
+      "subjects": [
+        {
+          "name": "ops.alerts",
+          "purpose": "messaging",
+          "durable": true,
+          "extra": {}
+        },
+        {
+          "name": "support.inbound",
+          "purpose": "messaging",
+          "durable": true,
+          "extra": {}
+        }
+      ],
+      "extra": {}
+    },
+    "channels": [
+      {
+        "name": "Slack Support",
+        "flow_id": "support-chat",
+        "kind": "channels.slack.support",
+        "config": {}
+      },
+      {
+        "name": "Teams Ops",
+        "flow_id": "ops-alerts",
+        "kind": "channels.teams.ops",
+        "config": {}
+      },
+      {
+        "name": "messaging.subjects.ops.alerts",
+        "flow_id": "ops-alerts",
+        "kind": "messaging.subjects.ops.alerts",
+        "config": {}
+      },
+      {
+        "name": "messaging.subjects.support.inbound",
+        "flow_id": "support-chat",
+        "kind": "messaging.subjects.support.inbound",
+        "config": {}
+      }
+    ],
+    "secrets": [
+      {
+        "key": "SLACK_BOT_TOKEN",
+        "required": true,
+        "scope": "tenant"
+      },
+      {
+        "key": "CRM_API_TOKEN",
+        "required": true,
+        "scope": "tenant"
+      },
+      {
+        "key": "PAGERDUTY_API_KEY",
+        "required": true,
+        "scope": "tenant"
+      },
+      {
+        "key": "TEAMS_CLIENT_SECRET",
+        "required": true,
+        "scope": "tenant"
+      }
+    ],
+    "oauth": [
+      {
+        "provider_id": "microsoft",
+        "logical_client_id": "acme-teams-plus",
+        "redirect_path": "/oauth/microsoft/callback/acmeplus/staging",
+        "extra": {
+          "client_id": "acme-teams-plus",
+          "scopes": [
+            "User.Read"
+          ]
+        }
+      },
+      {
+        "provider_id": "slack",
+        "logical_client_id": "acme-slack-plus",
+        "redirect_path": "/oauth/slack/callback/acmeplus/staging",
+        "extra": {
+          "client_id": "acme-slack-plus",
+          "scopes": [
+            "chat:write",
+            "commands"
+          ]
+        }
+      }
+    ],
+    "telemetry": {
+      "required": true,
+      "extra": {}
+    },
+    "extra": {}
+  },
+  "messaging": {
+    "logical_cluster": "default",
+    "replicas": 1,
+    "admin_url": "https://nats.staging.acmeplus.svc"
+  },
+  "telemetry": {
+    "otlp_endpoint": "https://otel.greentic.ai",
+    "resource_attributes": {
+      "deployment.environment": "staging",
+      "greentic.tenant": "acmeplus",
+      "service.name": "greentic-deployer-aws"
+    }
+  },
+  "channels": [
+    {
+      "name": "Slack Support",
+      "kind": "channels.slack.support",
+      "ingress": [
+        "https://deploy.greentic.ai/ingress/staging/acmeplus/channels.slack.support"
+      ],
+      "oauth_required": false
+    },
+    {
+      "name": "Teams Ops",
+      "kind": "channels.teams.ops",
+      "ingress": [
+        "https://deploy.greentic.ai/ingress/staging/acmeplus/channels.teams.ops"
+      ],
+      "oauth_required": false
+    },
+    {
+      "name": "messaging.subjects.ops.alerts",
+      "kind": "messaging.subjects.ops.alerts",
+      "ingress": [
+        "https://deploy.greentic.ai/ingress/staging/acmeplus/messaging.subjects.ops.alerts"
+      ],
+      "oauth_required": false
+    },
+    {
+      "name": "messaging.subjects.support.inbound",
+      "kind": "messaging.subjects.support.inbound",
+      "ingress": [
+        "https://deploy.greentic.ai/ingress/staging/acmeplus/messaging.subjects.support.inbound"
+      ],
+      "oauth_required": false
+    }
+  ],
+  "secrets": [
+    {
+      "key": "SLACK_BOT_TOKEN",
+      "scope": "tenant"
+    },
+    {
+      "key": "CRM_API_TOKEN",
+      "scope": "tenant"
+    },
+    {
+      "key": "PAGERDUTY_API_KEY",
+      "scope": "tenant"
+    },
+    {
+      "key": "TEAMS_CLIENT_SECRET",
+      "scope": "tenant"
+    }
+  ]
+}

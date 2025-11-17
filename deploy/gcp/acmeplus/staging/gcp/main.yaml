@@ -1,0 +1,50 @@
+resources:
+  - name: greentic-acme-plus-runner-runner
+    type: run.v1.service
+    properties:
+      template:
+        spec:
+          containers:
+          - name: greentic-acme-plus-runner
+            image: gcr.io/greentic/runner:latest
+            env:
+            - name: NATS_URL
+              value: 'https://nats.staging.acmeplus.svc'
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: 'https://otel.greentic.ai'
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: 'deployment.environment=staging,greentic.tenant=acmeplus,service.name=greentic-deployer-gcp'
+            - name: PAGERDUTY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  secret: projects/greentic/secrets/greentic-acmeplus-staging-PAGERDUTY_API_KEY/versions/latest
+                  version: latest
+            - name: TEAMS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  secret: projects/greentic/secrets/greentic-acmeplus-staging-TEAMS_CLIENT_SECRET/versions/latest
+                  version: latest
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  secret: projects/greentic/secrets/greentic-acmeplus-staging-SLACK_BOT_TOKEN/versions/latest
+                  version: latest
+            - name: CRM_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  secret: projects/greentic/secrets/greentic-acmeplus-staging-CRM_API_TOKEN/versions/latest
+                  version: latest
+
+# Channel ingress endpoints
+# - Slack Support (type = channels.slack.support, oauth_required = false)
+#   ingress: https://deploy.greentic.ai/ingress/staging/acmeplus/channels.slack.support
+# - Teams Ops (type = channels.teams.ops, oauth_required = false)
+#   ingress: https://deploy.greentic.ai/ingress/staging/acmeplus/channels.teams.ops
+# - messaging.subjects.ops.alerts (type = messaging.subjects.ops.alerts, oauth_required = false)
+#   ingress: https://deploy.greentic.ai/ingress/staging/acmeplus/messaging.subjects.ops.alerts
+# - messaging.subjects.support.inbound (type = messaging.subjects.support.inbound, oauth_required = false)
+#   ingress: https://deploy.greentic.ai/ingress/staging/acmeplus/messaging.subjects.support.inbound
+
+# OAuth redirect URLs
+# - /oauth/microsoft/callback -> /oauth/microsoft/callback/acmeplus/staging
+# - /oauth/slack/callback -> /oauth/slack/callback/acmeplus/staging

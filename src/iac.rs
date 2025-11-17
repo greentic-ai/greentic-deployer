@@ -110,7 +110,7 @@ impl IaCCommandRunner for DefaultIaCCommandRunner {
                     Ok(())
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                    let step = args.get(0).copied().unwrap_or("command").to_string();
+                    let step = args.first().copied().unwrap_or("command").to_string();
                     debug!(tool = ?tool, step = %step, stderr = %stderr);
                     Err(DeployerError::IaCTool {
                         tool: tool.to_string(),
@@ -185,8 +185,11 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    type IaCInvocation = (IaCTool, Vec<String>);
+    type IaCCallLog = Arc<Mutex<Vec<IaCInvocation>>>;
+
     struct MockRunner {
-        calls: Arc<Mutex<Vec<(IaCTool, Vec<String>)>>>,
+        calls: IaCCallLog,
     }
 
     impl MockRunner {
@@ -196,7 +199,7 @@ mod tests {
             }
         }
 
-        fn calls(&self) -> Vec<(IaCTool, Vec<String>)> {
+        fn calls(&self) -> Vec<IaCInvocation> {
             self.calls.lock().unwrap().clone()
         }
     }

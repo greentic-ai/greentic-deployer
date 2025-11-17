@@ -11,7 +11,7 @@ use crate::iac::{
     run_iac_plan_apply,
 };
 use crate::pack_introspect;
-use crate::plan::SecretSpec;
+use crate::plan::SecretContext;
 use crate::providers::{ProviderArtifacts, ResolvedSecret, create_backend};
 use crate::secrets::SecretsContext;
 use crate::telemetry;
@@ -139,15 +139,15 @@ fn write_artifacts(config: &DeployerConfig, artifacts: &ProviderArtifacts) -> Re
 
 async fn resolve_secrets(
     client: &SecretsContext,
-    specs: &[SecretSpec],
+    specs: &[SecretContext],
 ) -> Result<Vec<ResolvedSecret>> {
     let mut resolved = Vec::new();
     for spec in specs {
-        let provider_path = client.logical_to_provider_path(&spec.name);
-        let value = client.resolve(&spec.name).await?;
+        let provider_path = client.logical_to_provider_path(&spec.key);
+        let value = client.resolve(&spec.key).await?;
         info!(
             "resolved secret {} -> {} ({} bytes)",
-            spec.name,
+            spec.key,
             provider_path,
             value.len()
         );
@@ -168,12 +168,9 @@ fn stage_span(stage: &str, config: &DeployerConfig) -> tracing::Span {
         environment = %config.environment,
         provider = %config.provider.as_str()
     );
-    span.record("greentic.deployer.provider", &config.provider.as_str());
-    span.record("greentic.deployer.tenant", &config.tenant.as_str());
-    span.record(
-        "greentic.deployer.environment",
-        &config.environment.as_str(),
-    );
+    span.record("greentic.deployer.provider", config.provider.as_str());
+    span.record("greentic.deployer.tenant", config.tenant.as_str());
+    span.record("greentic.deployer.environment", config.environment.as_str());
     span
 }
 

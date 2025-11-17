@@ -12,8 +12,5 @@ pub mod telemetry;
 
 pub use config::{Action, CliArgs, Command, DeployerConfig, Provider};
 pub use error::DeployerError;
-pub use plan::{
-    ChannelServicePlan, DeploymentPlan, FlowSummary, MessagingPlan, OAuthClientSpec,
-    RunnerServicePlan, SecretSpec, TelemetryPlan,
-};
+pub use plan::{ChannelContext, MessagingContext, PlanContext, SecretContext, TelemetryContext};
 pub use providers::{GeneratedFile, ProviderArtifacts, ProviderBackend};

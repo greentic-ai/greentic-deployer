@@ -76,7 +76,7 @@ impl SecretsContext {
 
         for secret in secrets {
             let uri = self
-                .secret_uri(&secret.spec.name)
+                .secret_uri(&secret.spec.key)
                 .map_err(|err| DeployerError::Secret(err.to_string()))?;
             resolver
                 .put_json(&uri.to_string(), &secret.value)
@@ -84,7 +84,7 @@ impl SecretsContext {
                 .map_err(|err| DeployerError::Secret(err.to_string()))?;
             info!(
                 "pushed secret {} to provider {} at {}",
-                secret.spec.name,
+                secret.spec.key,
                 provider.as_str(),
                 uri.to_string()
             );

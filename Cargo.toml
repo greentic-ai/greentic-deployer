@@ -1,17 +1,17 @@
 [package]
 name = "greentic-deployer"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
-greentic-flow = { version = "0.3" }
-greentic-pack = { version = "0.3"}
-greentic-secrets = { version = "0.3", features = ["providers-aws", "providers-azure", "providers-gcp", "providers-dev"] }
-greentic-telemetry = { version = "0.3", features = ["otlp"] }
-greentic-oauth-core = { path = "../greentic-oauth/crates/greentic-oauth-core" }
+greentic-flow = { version = "0.4" }
+greentic-pack = { version = "0.4" }
+greentic-secrets = { version = "0.4", features = ["providers-aws", "providers-azure", "providers-gcp", "providers-dev"] }
+greentic-telemetry = { version = "0.4", features = ["otlp"] }
+greentic-types = { version = "0.4" }
 serde = { version = "1", features = ["derive"] }
 serde_cbor = "0.11"
 serde_json = "1"
@@ -19,14 +19,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+which = "8"
 zip = { version = "6", default-features = false, features = ["deflate"] }
-which = "4"
 
 [dev-dependencies]
 tempfile = "3"
-
-[patch.crates-io]
-greentic-flow = { path = "../greentic-flow" }
-greentic-pack = { path = "../greentic-pack/crates/greentic-pack" }
-greentic-secrets = { path = "../greentic-secrets/greentic-secrets" }
-greentic-telemetry = { path = "../greentic-telemetry" }

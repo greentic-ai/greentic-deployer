@@ -7,18 +7,19 @@ use tracing::info;
 
 use crate::config::{DeployerConfig, Provider};
 use crate::error::Result;
-use crate::plan::{DeploymentPlan, RunnerServicePlan, SecretSpec};
+use crate::plan::{PlanContext, SecretContext};
 use crate::providers::{ApplyManifest, ProviderArtifacts, ProviderBackend, ResolvedSecret};
+use greentic_types::deployment::RunnerPlan;
 
 /// GCP-specific backend.
 #[derive(Clone)]
 pub struct GcpBackend {
     config: DeployerConfig,
-    plan: DeploymentPlan,
+    plan: PlanContext,
 }
 
 impl GcpBackend {
-    pub fn new(config: DeployerConfig, plan: DeploymentPlan) -> Self {
+    pub fn new(config: DeployerConfig, plan: PlanContext) -> Self {
         Self { config, plan }
     }
 
@@ -26,14 +27,14 @@ impl GcpBackend {
         let mut docs = String::new();
         writeln!(&mut docs, "resources:").ok();
 
-        if self.plan.runners.is_empty() {
+        if self.plan.plan.runners.is_empty() {
             writeln!(
                 &mut docs,
                 "  # no runner services detected; add Greentic components to this plan"
             )
             .ok();
         } else {
-            for runner in &self.plan.runners {
+            for runner in &self.plan.plan.runners {
                 let resource_name = format!("{}-runner", Self::sanitize_name(&runner.name));
                 writeln!(&mut docs, "  - name: {}", resource_name).ok();
                 writeln!(&mut docs, "    type: run.v1.service").ok();
@@ -75,7 +76,7 @@ impl GcpBackend {
                 writeln!(
                     &mut docs,
                     "  {}: {}",
-                    spec.name,
+                    spec.key,
                     self.secret_manager_path(spec)
                 )
                 .ok();
@@ -84,7 +85,7 @@ impl GcpBackend {
         writeln!(
             &mut docs,
             "nats_admin_url: {}",
-            Self::yaml_quoted(&self.plan.messaging.nats.admin_url)
+            Self::yaml_quoted(&self.plan.messaging.admin_url)
         )
         .ok();
         writeln!(
@@ -96,18 +97,18 @@ impl GcpBackend {
         docs
     }
 
-    fn secret_manager_path(&self, spec: &SecretSpec) -> String {
+    fn secret_manager_path(&self, spec: &SecretContext) -> String {
         format!(
             "projects/greentic/secrets/greentic-{}-{}-{}/versions/latest",
-            self.config.tenant, self.config.environment, spec.name
+            self.config.tenant, self.config.environment, spec.key
         )
     }
 
-    fn gcp_env_entries(&self, runner: &RunnerServicePlan) -> Vec<String> {
+    fn gcp_env_entries(&self, _runner: &RunnerPlan) -> Vec<String> {
         let mut entries = Vec::new();
         entries.push(format!(
             "            - name: NATS_URL\n              value: {}",
-            Self::yaml_quoted(&self.plan.messaging.nats.admin_url)
+            Self::yaml_quoted(&self.plan.messaging.admin_url)
         ));
         entries.push(format!(
             "            - name: OTEL_EXPORTER_OTLP_ENDPOINT\n              value: {}",
@@ -121,18 +122,10 @@ impl GcpBackend {
             ));
         }
 
-        for binding in &runner.bindings {
-            entries.push(format!(
-                "            - name: {}\n              value: {}",
-                binding.name,
-                Self::yaml_quoted(&binding.detail)
-            ));
-        }
-
         for spec in &self.plan.secrets {
             entries.push(format!(
                 "            - name: {}\n              valueFrom:\n                secretKeyRef:\n                  secret: {}\n                  version: latest",
-                spec.name,
+                spec.key,
                 self.secret_manager_path(spec)
             ));
         }
@@ -147,16 +140,11 @@ impl GcpBackend {
         let mut block = String::new();
         writeln!(&mut block, "\n# Channel ingress endpoints").ok();
         for channel in &self.plan.channels {
-            let ingress = channel
-                .ingress
-                .iter()
-                .map(|endpoint| endpoint.url.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let ingress = channel.ingress.join(", ");
             writeln!(
                 &mut block,
                 "# - {} (type = {}, oauth_required = {})",
-                channel.name, channel.channel_type, channel.oauth_required
+                channel.name, channel.kind, channel.oauth_required
             )
             .ok();
             writeln!(&mut block, "#   ingress: {}", ingress).ok();
@@ -165,15 +153,18 @@ impl GcpBackend {
     }
 
     fn oauth_comments(&self) -> String {
-        if self.plan.oauth_clients.is_empty() {
+        if self.plan.plan.oauth.is_empty() {
             return String::new();
         }
         let mut block = String::new();
         writeln!(&mut block, "\n# OAuth redirect URLs").ok();
-        for client in &self.plan.oauth_clients {
-            for url in &client.redirect_urls {
-                writeln!(&mut block, "# - {} ({})", url, client.provider.as_str()).ok();
-            }
+        for client in &self.plan.plan.oauth {
+            writeln!(
+                &mut block,
+                "# - /oauth/{}/callback -> {}",
+                client.provider_id, client.redirect_path
+            )
+            .ok();
         }
         block
     }

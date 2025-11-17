@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environment": {
+      "value": "staging"
+    },
+    "natsAdminUrl": {
+      "value": "https://nats.staging.acmeplus.svc"
+    },
+    "secretPaths": {
+      "value": {
+        "CRM_API_TOKEN": "@sec:greentic/acmeplus/staging/CRM_API_TOKEN",
+        "PAGERDUTY_API_KEY": "@sec:greentic/acmeplus/staging/PAGERDUTY_API_KEY",
+        "SLACK_BOT_TOKEN": "@sec:greentic/acmeplus/staging/SLACK_BOT_TOKEN",
+        "TEAMS_CLIENT_SECRET": "@sec:greentic/acmeplus/staging/TEAMS_CLIENT_SECRET"
+      }
+    },
+    "telemetryEndpoint": {
+      "value": "https://otel.greentic.ai"
+    },
+    "tenant": {
+      "value": "acmeplus"
+    }
+  }
+}

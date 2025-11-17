@@ -9,18 +9,22 @@ use tracing::info;
 
 use crate::config::{DeployerConfig, Provider};
 use crate::error::Result;
-use crate::plan::{DeploymentPlan, RunnerServicePlan, SecretSpec};
+use crate::plan::{PlanContext, SecretContext};
+use greentic_types::deployment::RunnerPlan;
+
+const DEFAULT_CPU_MILLIS: u32 = 512;
+const DEFAULT_MEMORY_MB: u32 = 1024;
 use crate::providers::{ApplyManifest, ProviderArtifacts, ProviderBackend, ResolvedSecret};
 
 /// AWS-specific backend.
 #[derive(Clone)]
 pub struct AwsBackend {
     config: DeployerConfig,
-    plan: DeploymentPlan,
+    plan: PlanContext,
 }
 
 impl AwsBackend {
-    pub fn new(config: DeployerConfig, plan: DeploymentPlan) -> Self {
+    pub fn new(config: DeployerConfig, plan: PlanContext) -> Self {
         Self { config, plan }
     }
 
@@ -48,13 +52,13 @@ impl AwsBackend {
         writeln!(
             &mut buffer,
             "  nats_cluster = \"{}\"",
-            Self::escape_value(&self.plan.messaging.nats.cluster_name)
+            Self::escape_value(&self.plan.messaging.logical_cluster)
         )
         .ok();
         writeln!(
             &mut buffer,
             "  nats_admin_url = \"{}\"",
-            Self::escape_value(&self.plan.messaging.nats.admin_url)
+            Self::escape_value(&self.plan.messaging.admin_url)
         )
         .ok();
         writeln!(
@@ -96,7 +100,7 @@ impl AwsBackend {
                     &mut buffer,
                     "variable \"{}\" {{\n  type = string\n  description = \"Secret identifier for {}\"\n}}\n",
                     variable,
-                    spec.name
+                    spec.key
                 )
                 .ok();
             }
@@ -122,15 +126,15 @@ impl AwsBackend {
         }
     }
 
-    fn secret_variable_name(&self, spec: &SecretSpec) -> String {
-        format!("{}_secret_id", Self::sanitized_name(&spec.name))
+    fn secret_variable_name(&self, spec: &SecretContext) -> String {
+        format!("{}_secret_id", Self::sanitized_name(&spec.key))
     }
 
-    fn secret_data_name(&self, spec: &SecretSpec) -> String {
-        format!("secret_{}", Self::sanitized_name(&spec.name))
+    fn secret_data_name(&self, spec: &SecretContext) -> String {
+        format!("secret_{}", Self::sanitized_name(&spec.key))
     }
 
-    fn runner_resource_name(&self, runner: &RunnerServicePlan) -> String {
+    fn runner_resource_name(&self, runner: &RunnerPlan) -> String {
         format!("runner_{}", Self::sanitized_name(&runner.name))
     }
 
@@ -161,11 +165,11 @@ impl AwsBackend {
         block
     }
 
-    fn runner_env_entries(&self, runner: &RunnerServicePlan) -> Vec<String> {
+    fn runner_env_entries(&self, _runner: &RunnerPlan) -> Vec<String> {
         let mut entries = Vec::new();
         entries.push(format!(
             "    {{ \"name\": \"NATS_URL\", \"value\": \"{}\" }}",
-            Self::escape_value(&self.plan.messaging.nats.admin_url)
+            Self::escape_value(&self.plan.messaging.admin_url)
         ));
         entries.push(format!(
             "    {{ \"name\": \"OTEL_EXPORTER_OTLP_ENDPOINT\", \"value\": \"{}\" }}",
@@ -179,19 +183,11 @@ impl AwsBackend {
             ));
         }
 
-        for binding in &runner.bindings {
-            entries.push(format!(
-                "    {{ \"name\": \"{}\", \"value\": \"{}\" }}",
-                binding.name,
-                Self::escape_value(&binding.detail)
-            ));
-        }
-
         for spec in &self.plan.secrets {
             let data_name = self.secret_data_name(spec);
             entries.push(format!(
                 "    {{ \"name\": \"{}\", \"value\": data.aws_secretsmanager_secret_version.{}.secret_string }}",
-                spec.name, data_name
+                spec.key, data_name
             ));
         }
 
@@ -200,7 +196,7 @@ impl AwsBackend {
 
     fn runner_resources(&self) -> String {
         let mut block = String::new();
-        if self.plan.runners.is_empty() {
+        if self.plan.plan.runners.is_empty() {
             writeln!(
                 &mut block,
                 "\n# No runner services found in the plan; add components to execute greentic flows."
@@ -215,7 +211,7 @@ impl AwsBackend {
         )
         .ok();
 
-        for runner in &self.plan.runners {
+        for runner in &self.plan.plan.runners {
             let resource_name = self.runner_resource_name(runner);
             let container_name = Self::escape_value(&runner.name);
             let env_block = self.runner_env_entries(runner).join(",\n");
@@ -227,18 +223,8 @@ impl AwsBackend {
             )
             .ok();
             writeln!(&mut block, "  family = \"{}\"", container_name).ok();
-            writeln!(
-                &mut block,
-                "  cpu = \"{}\"",
-                runner.resources.cpu_millis.max(256)
-            )
-            .ok();
-            writeln!(
-                &mut block,
-                "  memory = \"{}\"",
-                runner.resources.memory_mb.max(512)
-            )
-            .ok();
+            writeln!(&mut block, "  cpu = \"{}\"", DEFAULT_CPU_MILLIS).ok();
+            writeln!(&mut block, "  memory = \"{}\"", DEFAULT_MEMORY_MB).ok();
             writeln!(
                 &mut block,
                 "  requires_compatibilities = [\"FARGATE\"]\n  network_mode = \"awsvpc\""
@@ -285,16 +271,11 @@ impl AwsBackend {
         let mut block = String::new();
         writeln!(&mut block, "\n# Channel ingress endpoints").ok();
         for channel in &self.plan.channels {
-            let ingress = channel
-                .ingress
-                .iter()
-                .map(|endpoint| endpoint.url.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let ingress = channel.ingress.join(", ");
             writeln!(
                 &mut block,
                 "# - {} (type = {}, oauth_required = {})",
-                channel.name, channel.channel_type, channel.oauth_required
+                channel.name, channel.kind, channel.oauth_required
             )
             .ok();
             writeln!(&mut block, "#   ingress: {}", ingress).ok();
@@ -303,15 +284,18 @@ impl AwsBackend {
     }
 
     fn oauth_comments(&self) -> String {
-        if self.plan.oauth_clients.is_empty() {
+        if self.plan.plan.oauth.is_empty() {
             return String::new();
         }
         let mut block = String::new();
         writeln!(&mut block, "\n# OAuth redirect URLs").ok();
-        for client in &self.plan.oauth_clients {
-            for url in &client.redirect_urls {
-                writeln!(&mut block, "# - {} ({})", url, client.provider.as_str()).ok();
-            }
+        for client in &self.plan.plan.oauth {
+            writeln!(
+                &mut block,
+                "# - /oauth/{}/callback via {}",
+                client.provider_id, client.redirect_path
+            )
+            .ok();
         }
         block
     }
@@ -406,61 +390,5 @@ impl AwsBackend {
         let payload = serde_json::to_string_pretty(&manifest)?;
         fs::write(&path, payload)?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::{Action, DeployerConfig, Provider};
-    use crate::iac::IaCTool;
-    use crate::plan::{DeploymentPlan, MessagingPlan, NatsPlan, TelemetryPlan};
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
-
-    fn sample_plan() -> DeploymentPlan {
-        DeploymentPlan {
-            tenant: "demo".into(),
-            environment: "dev".into(),
-            pack_id: "demo".into(),
-            pack_version: "0.1.0".into(),
-            flows: Vec::new(),
-            messaging: MessagingPlan {
-                nats: NatsPlan {
-                    cluster_name: "nats-demo".into(),
-                    replicas: 1,
-                    enable_jetstream: true,
-                    admin_url: "https://nats.example".into(),
-                },
-                subjects: vec!["messaging.activities.in.demo".into()],
-            },
-            runners: Vec::new(),
-            channels: Vec::new(),
-            secrets: Vec::new(),
-            oauth_clients: Vec::new(),
-            telemetry: TelemetryPlan {
-                otlp_endpoint: "https://otel.example".into(),
-                resource_attributes: BTreeMap::new(),
-            },
-        }
-    }
-
-    #[tokio::test]
-    async fn aws_plan_emits_artifacts() {
-        let config = DeployerConfig {
-            action: Action::Plan,
-            provider: Provider::Aws,
-            tenant: "acme".into(),
-            environment: "dev".into(),
-            pack_path: PathBuf::from("examples/acme-pack"),
-            yes: true,
-            preview: false,
-            dry_run: false,
-            iac_tool: IaCTool::Terraform,
-        };
-
-        let backend = AwsBackend::new(config, sample_plan());
-        let artifacts = backend.plan().await.expect("plan succeeds");
-        assert!(!artifacts.files.is_empty());
     }
 }

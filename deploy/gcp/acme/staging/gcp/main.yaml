@@ -1,0 +1,30 @@
+resources:
+  - name: greentic-acme-runner-runner
+    type: run.v1.service
+    properties:
+      template:
+        spec:
+          containers:
+          - name: greentic-acme-runner
+            image: gcr.io/greentic/runner:latest
+            env:
+            - name: NATS_URL
+              value: 'https://nats.staging.acme.svc'
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: 'https://otel.greentic.ai'
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: 'deployment.environment=staging,greentic.tenant=acme,service.name=greentic-deployer-gcp'
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  secret: projects/greentic/secrets/greentic-acme-staging-SLACK_BOT_TOKEN/versions/latest
+                  version: latest
+            - name: TEAMS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  secret: projects/greentic/secrets/greentic-acme-staging-TEAMS_CLIENT_SECRET/versions/latest
+                  version: latest
+
+# OAuth redirect URLs
+# - /oauth/microsoft/callback -> /oauth/microsoft/callback/acme/staging
+# - /oauth/slack/callback -> /oauth/slack/callback/acme/staging
