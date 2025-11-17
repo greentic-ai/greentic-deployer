@@ -161,6 +161,10 @@ impl ApplyManifest {
 }
 
 /// Provider backend interface.
+///
+/// NOTE: These Rust backends are transitional shims. New deployment targets
+/// should be implemented as deployment packs (see docs/deployment-packs.md)
+/// executed via greentic-runner instead of extending these modules.
 #[async_trait]
 pub trait ProviderBackend: Send + Sync {
     async fn plan(&self) -> Result<ProviderArtifacts>;

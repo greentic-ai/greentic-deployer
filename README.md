@@ -1,12 +1,13 @@
 # Greentic Deployer
 
-`greentic-deployer` is a CLI and library that builds cloud-agnostic deployment plans for Greentic packs and materialises provider-specific artifacts for AWS, Azure, and GCP.
+`greentic-deployer` is a CLI and library that builds cloud-agnostic deployment plans for Greentic packs and then runs provider-specific *deployment packs* (kind `deployment`) to materialise the required IaC/artifacts for AWS, Azure, GCP, or any other target.
 
 ## Concepts
 
-- **Packs** describe flows, components, tools, secrets, and tenant bindings. The deployer introspects packs to understand runners, messaging, channels, secrets, OAuth, and telemetry requirements.
-- **DeploymentPlan** is a cloud-agnostic model that captures messaging (NATS) topology, runner services, channel ingress, secrets, OAuth redirect URLs, and telemetry hooks.
-- **Providers** map the plan to provider-specific artifacts (Terraform, Bicep, Deployment Manager snippets) and manage secrets via the configured secrets backend.
+- **Application packs** (kind `application` or `mixed`) describe flows, components, tools, secrets, and tenant bindings. `greentic-deployer` introspects them to understand runners, messaging, channels, secrets, OAuth, and telemetry requirements.
+- **DeploymentPlan** is a provider-agnostic model (`greentic-types::DeploymentPlan`) that captures messaging topology, runner services, channel ingress, secrets, OAuth redirect URLs, and telemetry hooks.
+- **Deployment packs** (kind `deployment`) supply provider-specific deployment flows. Each flow is a `type: events` flow made of deployment components (`supports: ["events"]`, `world: "greentic:deploy-plan@1.0.0"`) that can read the plan via `get-deployment-plan()` and emit IaC/templates when the host grants `host.iac.write_templates`.
+- **Providers / strategies** are a mapping (`provider`, `strategy`) → `(deployment_pack_id, deploy_flow_id)`; e.g. `("aws","serverless") -> ("greentic.deploy.aws","deploy_aws_serverless")`. `greentic-deployer` chooses the mapping for the requested `--provider`/`--strategy`, loads that deployment pack, and executes it via `greentic-runner`.
 
 ## Building
 
@@ -61,21 +62,21 @@ Plans and provider artifacts are written to `deploy/<provider>/<tenant>/<environ
 
 ## Runner & Messaging Insights
 
-- The deployment plan includes binding hints per runner (e.g. NATS connectivity, channel ingress) plus the WASI world name for every component so provider backends know what to host.
-- `MessagingPlan` captures the JetStream-enabled cluster topology (cluster name, replicas, admin URL, subjects, and stream hints) that every provider artifact references in the generated Terraform/Bicep/YAML snippets.
+- The deployment plan includes binding hints per runner (e.g. NATS connectivity, channel ingress) plus the WASI world name for every component so deployment packs know what to host.
+- `MessagingPlan` captures the JetStream-enabled cluster topology and subjects that deployment packs may reference when producing IaC snippets.
 
 ## Example packs
 
 ### `examples/acme-pack`
 
-- Minimal single-flow pack with two secrets and two OAuth clients surfaced via annotations.
-- Component manifests (`components/qa/process/manifest.json`) drive secret discovery so provider manifests render the right vault references.
+- Minimal single-flow *application pack* with two secrets and two OAuth clients surfaced via annotations.
+- Component manifests (`components/qa/process/manifest.json`) drive secret discovery so deployment packs render the right vault references.
 - Running the CLI drops `master.tf`, `variables.tf`, and `plan.json` under `deploy/<provider>/acme/staging/`.
 
 ### `examples/acme-plus-pack`
 
-- Multi-flow pack with two components (`support.automator`, `ops.router`), four secrets, two channel connectors, and explicit messaging subjects.
-- Exercising this pack produces richer IaC (multiple runners, channel ingress comments, expanded telemetry hints) under `deploy/<provider>/acmeplus/staging/`.
+- Multi-flow application pack with two components (`support.automator`, `ops.router`), four secrets, two channel connectors, and explicit messaging subjects.
+- Exercising this pack produces richer IaC under `deploy/<provider>/acmeplus/staging/`.
 
 Both packs log telemetry via `greentic-telemetry` so plan/apply/destroy traces show up in OTLP backends.
 
@@ -106,7 +107,7 @@ Once artifacts exist and secrets are stored you can re-run them manually:
    - `master.bicep`, `parameters.json`, `plan.json` (Azure).
    - `master.yaml`, `parameters.yaml`, `plan.json` (GCP).
 3. `apply`/`destroy` write manifests listing secrets, OAuth redirects, and telemetry attributes, so you can double-check before running IaC directly.
-4. Repeat with the larger pack:
+4. Repeat with the larger pack (same deployment pack, richer plan):
    ```bash
    cargo run -p greentic-deployer -- plan --provider aws --tenant acmeplus --environment staging --pack examples/acme-plus-pack
    ```
@@ -116,14 +117,17 @@ Once artifacts exist and secrets are stored you can re-run them manually:
 - `scripts/ci-smoke.sh` iterates over providers (`aws/azure/gcp`), actions (`apply/destroy`), and both packs in `--dry-run` mode to guarantee IaC command generation works.
 - `./ci/local_check.sh` is the local equivalent run before pushing (fmt, clippy, tests, docs, and the smoke script).
 
-## Sample IaC output
+## Sample IaC output / deployment packs
 
-- `deploy/aws/acmeplus/staging/master.tf` shows ECS clusters, task definitions, runner env vars, and the greentic secret data sources.
-- `deploy/azure/acmeplus/staging/master.bicep` includes container apps with `secretPaths` wiring and telemetry env vars.
-- `deploy/gcp/acmeplus/staging/master.yaml` expresses Deployment Manager deployments with inline Secret Manager refs.
+- Deployment packs such as `greentic.deploy.aws` or `greentic.deploy.generic` consume the plan via `greentic:deploy-plan@1.0.0` and emit IaC under `deploy/<provider>/<tenant>/<environment>/`.
+- `deploy/aws/acmeplus/staging/master.tf` highlights the ECS setup generated by the AWS deployment pack.
+- `deploy/azure/acmeplus/staging/master.bicep` includes container apps and secret bindings generated by the Azure deployment pack.
+- `deploy/gcp/acmeplus/staging/master.yaml` expresses Deployment Manager resources with inline Secret Manager references from the GCP deployment pack.
 - See `docs/provider-visual-guide.md` (and the SVG mocks under `docs/images/`) for diagrams + screenshot tips.
 
-## Next steps
+## Adding new deployment targets
 
-1. Add additional pack fixtures with more flows/components to stretch runner sizing logic.
-2. Capture live Terraform/Bicep/YAML snippets (beyond the mocks) once CI smoke tests run in hosted agents.
+- Author a **deployment pack** (`kind: deployment`) with `type: events` flows made of deployment components (`supports: ["events"]`, `world: "greentic:deploy-plan@1.0.0"`, `host.iac.write_templates = true`).
+- Publish that pack (e.g. `greentic.deploy.mycloud` with flow `deploy_mycloud_iac`).
+- Update the provider/strategy mapping so `("mycloud","iac") -> ("greentic.deploy.mycloud","deploy_mycloud_iac")`.
+- `greentic-deployer` remains provider-agnostic: it loads the application pack, builds the `DeploymentPlan`, selects the deployment pack based on `--provider/--strategy`, and delegates IaC generation to the flow via `greentic-runner`.
