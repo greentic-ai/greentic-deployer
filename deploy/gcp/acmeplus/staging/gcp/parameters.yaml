@@ -1,0 +1,7 @@
+secret_paths:
+  PAGERDUTY_API_KEY: projects/greentic/secrets/greentic-acmeplus-staging-PAGERDUTY_API_KEY/versions/latest
+  TEAMS_CLIENT_SECRET: projects/greentic/secrets/greentic-acmeplus-staging-TEAMS_CLIENT_SECRET/versions/latest
+  SLACK_BOT_TOKEN: projects/greentic/secrets/greentic-acmeplus-staging-SLACK_BOT_TOKEN/versions/latest
+  CRM_API_TOKEN: projects/greentic/secrets/greentic-acmeplus-staging-CRM_API_TOKEN/versions/latest
+nats_admin_url: 'https://nats.staging.acmeplus.svc'
+telemetry_endpoint: 'https://otel.greentic.ai'

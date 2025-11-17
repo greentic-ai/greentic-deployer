@@ -1,0 +1,84 @@
+{
+  "plan": {
+    "pack_id": "greentic.acme",
+    "pack_version": "0.1.0",
+    "tenant": "acme",
+    "environment": "staging",
+    "runners": [
+      {
+        "name": "greentic.acme-runner",
+        "replicas": 1,
+        "capabilities": {
+          "flows": [
+            "acme-messaging"
+          ]
+        }
+      }
+    ],
+    "channels": [],
+    "secrets": [
+      {
+        "key": "SLACK_BOT_TOKEN",
+        "required": true,
+        "scope": "tenant"
+      },
+      {
+        "key": "TEAMS_CLIENT_SECRET",
+        "required": true,
+        "scope": "tenant"
+      }
+    ],
+    "oauth": [
+      {
+        "provider_id": "microsoft",
+        "logical_client_id": "acme-staging-microsoft",
+        "redirect_path": "/oauth/microsoft/callback/acme/staging",
+        "extra": {
+          "scopes": [
+            "User.Read"
+          ]
+        }
+      },
+      {
+        "provider_id": "slack",
+        "logical_client_id": "acme-staging-slack",
+        "redirect_path": "/oauth/slack/callback/acme/staging",
+        "extra": {
+          "scopes": [
+            "chat:write",
+            "commands"
+          ]
+        }
+      }
+    ],
+    "telemetry": {
+      "required": true,
+      "extra": {}
+    },
+    "extra": {}
+  },
+  "messaging": {
+    "logical_cluster": "nats-staging-acme",
+    "replicas": 1,
+    "admin_url": "https://nats.staging.acme.svc"
+  },
+  "telemetry": {
+    "otlp_endpoint": "https://otel.greentic.ai",
+    "resource_attributes": {
+      "deployment.environment": "staging",
+      "greentic.tenant": "acme",
+      "service.name": "greentic-deployer-aws"
+    }
+  },
+  "channels": [],
+  "secrets": [
+    {
+      "key": "SLACK_BOT_TOKEN",
+      "scope": "tenant"
+    },
+    {
+      "key": "TEAMS_CLIENT_SECRET",
+      "scope": "tenant"
+    }
+  ]
+}

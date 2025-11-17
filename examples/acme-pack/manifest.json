@@ -50,7 +50,7 @@
       "file_wasm": "components/qa/process/component.wasm",
       "hash_blake3": "0000000000000000000000000000000000000000000000000000000000000000",
       "schema_file": null,
-      "manifest_file": null,
+      "manifest_file": "components/qa/process/manifest.json",
       "world": null,
       "capabilities": null
     }
