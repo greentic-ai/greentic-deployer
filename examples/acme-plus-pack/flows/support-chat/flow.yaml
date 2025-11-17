@@ -1,0 +1,17 @@
+id: support-chat
+title: ACME Plus Support Chat
+type: messaging
+start: greet
+
+nodes:
+  greet:
+    support.automator:
+      welcome: "Welcome to ACME Plus support!"
+    routing:
+      - to: escalate
+
+  escalate:
+    support.automator:
+      action: "routing to CRM and Slack"
+    routing:
+      - out: true

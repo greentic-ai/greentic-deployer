@@ -1,0 +1,28 @@
+{
+  "id": "ops.router",
+  "version": "0.2.0",
+  "supports": ["messaging"],
+  "world": "acme:ops/router",
+  "profiles": {
+    "default": "standard",
+    "supported": ["standard"]
+  },
+  "capabilities": {
+    "wasi": {
+      "random": true,
+      "clocks": true
+    },
+    "host": {
+      "secrets": {
+        "required": ["PAGERDUTY_API_KEY", "TEAMS_CLIENT_SECRET"]
+      },
+      "messaging": {
+        "inbound": true,
+        "outbound": true
+      },
+      "telemetry": {
+        "scope": "tenant"
+      }
+    }
+  }
+}

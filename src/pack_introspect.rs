@@ -1,24 +1,40 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
+use greentic_pack::builder::PackManifest;
+use greentic_pack::plan::infer_base_deployment_plan;
+use greentic_types::component::ComponentManifest;
+use greentic_types::deployment::{DeploymentPlan, OAuthPlan, SecretPlan};
+use greentic_types::{EnvId, TenantCtx, TenantId};
 use serde_cbor;
-use serde_json;
+use serde_json::{self, Map as JsonMap, Value as JsonValue};
 use zip::ZipArchive;
 
 use crate::config::DeployerConfig;
 use crate::error::{DeployerError, Result};
-use crate::plan::DeploymentPlan;
-use greentic_flow::FlowBundle;
-use greentic_flow::load_and_validate_bundle;
-use greentic_pack::builder::PackManifest;
+use crate::plan::{PlanContext, assemble_plan};
 
-/// Build a cloud-agnostic deployment plan from a Greentic pack.
-pub fn build_plan(config: &DeployerConfig) -> Result<DeploymentPlan> {
+/// Build a plan context from the provided pack.
+pub fn build_plan(config: &DeployerConfig) -> Result<PlanContext> {
     let mut source = PackSource::open(&config.pack_path)?;
     let manifest = source.read_manifest()?;
-    let flows = source.load_flows(&manifest)?;
-    Ok(DeploymentPlan::from_manifest(config, &manifest, &flows))
+    let components = source.load_component_manifests(&manifest)?;
+    let tenant_ctx = build_tenant_ctx(config)?;
+    let connectors = manifest.meta.annotations.get("connectors");
+    let mut base = infer_base_deployment_plan(
+        &manifest.meta,
+        &manifest.flows,
+        connectors,
+        &components,
+        &tenant_ctx,
+        &config.environment,
+    );
+    merge_annotation_secrets(&mut base, &manifest.meta.annotations);
+    merge_annotation_oauth(&mut base, &manifest.meta.annotations, config);
+    Ok(assemble_plan(base, config))
 }
 
 struct PackSource {
@@ -57,20 +73,24 @@ impl PackSource {
         }
     }
 
-    fn load_flows(&mut self, manifest: &PackManifest) -> Result<Vec<FlowBundle>> {
-        manifest
-            .flows
-            .iter()
-            .map(|entry| self.load_flow(entry))
-            .collect()
+    fn load_component_manifests(
+        &mut self,
+        manifest: &PackManifest,
+    ) -> Result<HashMap<String, ComponentManifest>> {
+        let mut components = HashMap::new();
+        for entry in &manifest.components {
+            if let Some(path) = &entry.manifest_file {
+                let json = self.read_file_to_string(path)?;
+                let parsed: ComponentManifest = serde_json::from_str(&json).map_err(|err| {
+                    DeployerError::Pack(format!("component manifest {} is invalid: {}", path, err))
+                })?;
+                components.insert(parsed.id.to_string(), parsed);
+            }
+        }
+        Ok(components)
     }
 
-    fn load_flow(&mut self, entry: &greentic_pack::builder::FlowEntry) -> Result<FlowBundle> {
-        let yaml = self.read_flow_yaml(&entry.file_yaml)?;
-        load_and_validate_bundle(&yaml, None).map_err(|err| DeployerError::Pack(err.to_string()))
-    }
-
-    fn read_flow_yaml(&mut self, relative_path: &str) -> Result<String> {
+    fn read_file_to_string(&mut self, relative_path: &str) -> Result<String> {
         match &mut self.inner {
             PackSourceInner::Archive(archive) => {
                 let mut entry = archive.by_name(relative_path)?;
@@ -105,10 +125,85 @@ fn read_manifest_from_directory(root: &Path) -> Result<PackManifest> {
     }
 }
 
+fn build_tenant_ctx(config: &DeployerConfig) -> Result<TenantCtx> {
+    let env_id = EnvId::from_str(&config.environment).map_err(|err| {
+        DeployerError::Config(format!(
+            "invalid environment '{}': {}",
+            config.environment, err
+        ))
+    })?;
+    let tenant_id = TenantId::from_str(&config.tenant).map_err(|err| {
+        DeployerError::Config(format!("invalid tenant '{}': {}", config.tenant, err))
+    })?;
+    Ok(TenantCtx::new(env_id, tenant_id))
+}
+
+fn merge_annotation_secrets(plan: &mut DeploymentPlan, annotations: &JsonMap<String, JsonValue>) {
+    let Some(secret_map) = annotations
+        .get("greentic.secrets")
+        .and_then(|value| value.as_object())
+    else {
+        return;
+    };
+
+    for key in secret_map.keys() {
+        if plan.secrets.iter().any(|entry| entry.key == *key) {
+            continue;
+        }
+        plan.secrets.push(SecretPlan {
+            key: key.clone(),
+            required: true,
+            scope: "tenant".to_string(),
+        });
+    }
+}
+
+fn merge_annotation_oauth(
+    plan: &mut DeploymentPlan,
+    annotations: &JsonMap<String, JsonValue>,
+    config: &DeployerConfig,
+) {
+    let Some(oauth_map) = annotations
+        .get("greentic.oauth")
+        .and_then(|value| value.as_object())
+    else {
+        return;
+    };
+
+    if oauth_map.is_empty() {
+        return;
+    }
+
+    plan.oauth = oauth_map
+        .iter()
+        .map(|(provider, entry)| {
+            let logical_client_id = entry
+                .get("client_id")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| format!("{}-{}-{provider}", config.tenant, config.environment));
+
+            let redirect_path = format!(
+                "/oauth/{provider}/callback/{tenant}/{environment}",
+                tenant = config.tenant,
+                environment = config.environment
+            );
+
+            OAuthPlan {
+                provider_id: provider.clone(),
+                logical_client_id,
+                redirect_path,
+                extra: entry.clone(),
+            }
+        })
+        .collect();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Action, DeployerConfig, Provider};
+    use crate::iac::IaCTool;
     use std::path::PathBuf;
 
     #[test]
@@ -121,11 +216,43 @@ mod tests {
             pack_path: PathBuf::from("examples/acme-pack"),
             yes: true,
             preview: false,
+            dry_run: false,
+            iac_tool: IaCTool::Terraform,
         };
 
         let plan = build_plan(&config).expect("should build plan");
-        assert_eq!(plan.flows.len(), 1);
-        assert!(plan.channels.iter().any(|c| c.channel_type == "messaging"));
-        assert!(plan.secrets.iter().any(|s| s.name == "SLACK_BOT_TOKEN"));
+        assert_eq!(plan.plan.tenant, "acme");
+        assert_eq!(plan.plan.environment, "staging");
+        assert_eq!(plan.plan.runners.len(), 1);
+        assert_eq!(plan.plan.secrets.len(), 2);
+        assert_eq!(plan.plan.oauth.len(), 2);
+    }
+
+    #[test]
+    fn builds_plan_from_complex_pack() {
+        let config = DeployerConfig {
+            action: Action::Plan,
+            provider: Provider::Azure,
+            tenant: "acmeplus".into(),
+            environment: "staging".into(),
+            pack_path: PathBuf::from("examples/acme-plus-pack"),
+            yes: true,
+            preview: false,
+            dry_run: false,
+            iac_tool: IaCTool::Terraform,
+        };
+
+        let plan = build_plan(&config).expect("should build complex plan");
+        assert_eq!(plan.plan.tenant, "acmeplus");
+        assert!(plan.plan.messaging.is_some(), "expected messaging subjects");
+        assert!(
+            plan.plan.secrets.len() >= 4,
+            "expected merged secrets from annotations and components"
+        );
+        assert!(
+            plan.plan.channels.len() >= 2,
+            "expected channel entries from connectors"
+        );
+        assert_eq!(plan.plan.oauth.len(), 2);
     }
 }

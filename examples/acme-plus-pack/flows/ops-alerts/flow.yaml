@@ -1,0 +1,17 @@
+id: ops-alerts
+title: ACME Plus Ops Alerts
+type: messaging
+start: dispatch
+
+nodes:
+  dispatch:
+    ops.router:
+      message: "Dispatching alert to Teams and PagerDuty"
+    routing:
+      - to: confirm
+
+  confirm:
+    ops.router:
+      message: "Acknowledged"
+    routing:
+      - out: true

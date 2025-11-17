@@ -1,0 +1,106 @@
+{
+  "meta": {
+    "pack_id": "greentic.acme.plus",
+    "version": "0.2.0",
+    "name": "ACME Plus Pack",
+    "description": "Advanced pack with multiple flows and connectors.",
+    "authors": ["Greentic AI"],
+    "license": "MIT",
+    "imports": [
+      {
+        "pack_id": "secrets.get",
+        "version_req": ">=0.3"
+      },
+      {
+        "pack_id": "telemetry.emit",
+        "version_req": ">=0.2"
+      }
+    ],
+    "entry_flows": ["support-chat", "ops-alerts"],
+    "created_at_utc": "2025-01-05T00:00:00Z",
+    "annotations": {
+      "greentic.secrets": {
+        "SLACK_BOT_TOKEN": "Slack OAuth token",
+        "CRM_API_TOKEN": "CRM API token",
+        "PAGERDUTY_API_KEY": "PagerDuty API key",
+        "TEAMS_CLIENT_SECRET": "Teams client secret"
+      },
+      "greentic.oauth": {
+        "slack": {
+          "scopes": ["chat:write", "commands"],
+          "client_id": "acme-slack-plus"
+        },
+        "microsoft": {
+          "scopes": ["User.Read"],
+          "client_id": "acme-teams-plus"
+        }
+      },
+      "connectors": {
+        "messaging": {
+          "subjects": {
+            "support.inbound": {
+              "flow": "support-chat"
+            },
+            "ops.alerts": {
+              "flow": "ops-alerts"
+            }
+          }
+        },
+        "channels": {
+          "slack": {
+            "support": {
+              "flow": "support-chat",
+              "name": "Slack Support"
+            }
+          },
+          "teams": {
+            "ops": {
+              "flow": "ops-alerts",
+              "name": "Teams Ops"
+            }
+          }
+        }
+      }
+    }
+  },
+  "flows": [
+    {
+      "id": "support-chat",
+      "kind": "messaging",
+      "entry": "greet",
+      "file_yaml": "flows/support-chat/flow.yaml",
+      "file_json": "flows/support-chat/flow.json",
+      "hash_blake3": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "id": "ops-alerts",
+      "kind": "messaging",
+      "entry": "dispatch",
+      "file_yaml": "flows/ops-alerts/flow.yaml",
+      "file_json": "flows/ops-alerts/flow.json",
+      "hash_blake3": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "components": [
+    {
+      "name": "support.automator",
+      "version": "0.2.0",
+      "file_wasm": "components/support/automator/component.wasm",
+      "hash_blake3": "3333333333333333333333333333333333333333333333333333333333333333",
+      "schema_file": null,
+      "manifest_file": "components/support/automator/manifest.json",
+      "world": null,
+      "capabilities": null
+    },
+    {
+      "name": "ops.router",
+      "version": "0.2.0",
+      "file_wasm": "components/ops/router/component.wasm",
+      "hash_blake3": "4444444444444444444444444444444444444444444444444444444444444444",
+      "schema_file": null,
+      "manifest_file": "components/ops/router/manifest.json",
+      "world": null,
+      "capabilities": null
+    }
+  ]
+}

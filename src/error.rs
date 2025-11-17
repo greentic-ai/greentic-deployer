@@ -31,6 +31,19 @@ pub enum DeployerError {
     #[error("secret backend error: {0}")]
     Secret(String),
 
+    #[error(
+        "IaC tool '{tool}' missing on PATH (binary '{binary}'). Install it or choose --iac-tool / GREENTIC_IAC_TOOL."
+    )]
+    IaCToolMissing { tool: String, binary: &'static str },
+
+    #[error("IaC tool '{tool}' command '{step}' failed (exit {status:?}): {stderr}")]
+    IaCTool {
+        tool: String,
+        step: String,
+        status: Option<i32>,
+        stderr: String,
+    },
+
     #[error("unexpected error: {0}")]
     Other(String),
 }
