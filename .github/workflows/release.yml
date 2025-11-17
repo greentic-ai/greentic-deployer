@@ -1,0 +1,31 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  crate-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          publish_output=$(cargo publish --locked 2>&1) || status=$?
+          echo "$publish_output"
+          if [ "${status:-0}" -ne 0 ]; then
+            if echo "$publish_output" | grep -qi "already uploaded"; then
+              echo "Version already published; skipping error."
+            else
+              exit ${status:-1}
+            fi
+          fi
