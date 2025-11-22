@@ -1519,7 +1519,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "clap",
- "greentic-interfaces 0.4.34 (registry+https://github.com/rust-lang/crates.io-index)",
+ "greentic-interfaces",
  "greentic-types",
  "indexmap",
  "jsonschema",
@@ -1532,21 +1532,6 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "greentic-interfaces"
-version = "0.4.34"
-dependencies = [
- "anyhow",
- "greentic-types",
- "semver",
- "thiserror 2.0.17",
- "time",
- "wasmtime",
- "wit-bindgen 0.47.0",
- "wit-bindgen-core",
- "wit-bindgen-rust",
 ]
 
 [[package]]
@@ -1569,8 +1554,10 @@ dependencies = [
 [[package]]
 name = "greentic-interfaces-host"
 version = "0.4.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1eee8750461a11ac8d19907245dc6dbc2f186042a320a32032fa6cba9b73c7cd"
 dependencies = [
- "greentic-interfaces 0.4.34",
+ "greentic-interfaces",
  "greentic-types",
 ]
 
