@@ -30,6 +30,9 @@
         "microsoft": {
           "scopes": ["User.Read"]
         }
+      },
+      "greentic.deployment": {
+        "strategy": "iac-only"
       }
     }
   },

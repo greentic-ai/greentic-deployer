@@ -50,6 +50,10 @@ pub struct ActionArgs {
     #[arg(long, value_enum)]
     pub provider: Provider,
 
+    /// Deployment strategy identifier (e.g. serverless, vm, iac-only).
+    #[arg(long, default_value = "iac-only")]
+    pub strategy: String,
+
     /// Tenant identifier (e.g. acme).
     #[arg(long)]
     pub tenant: String,
@@ -107,6 +111,7 @@ pub enum Command {
 pub struct DeployerConfig {
     pub action: Action,
     pub provider: Provider,
+    pub strategy: String,
     pub tenant: String,
     pub environment: String,
     pub pack_path: PathBuf,
@@ -141,6 +146,7 @@ impl DeployerConfig {
         Ok(Self {
             action,
             provider: args.provider,
+            strategy: args.strategy,
             tenant: args.tenant,
             environment,
             pack_path: args.pack,

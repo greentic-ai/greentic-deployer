@@ -35,6 +35,9 @@
           "client_id": "acme-teams-plus"
         }
       },
+      "greentic.deployment": {
+        "strategy": "iac-only"
+      },
       "connectors": {
         "messaging": {
           "subjects": {

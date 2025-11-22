@@ -64,6 +64,7 @@ async fn run_pack_flow(
     let apply_config = DeployerConfig {
         action: Action::Apply,
         provider,
+        strategy: "iac-only".into(),
         tenant: tenant.into(),
         environment: "staging".into(),
         pack_path: pack_path.into(),

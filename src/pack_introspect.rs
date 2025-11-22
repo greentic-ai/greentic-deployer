@@ -15,7 +15,7 @@ use zip::ZipArchive;
 
 use crate::config::DeployerConfig;
 use crate::error::{DeployerError, Result};
-use crate::plan::{PlanContext, assemble_plan};
+use crate::plan::{DeploymentHints, PlanContext, assemble_plan};
 
 /// Build a plan context from the provided pack.
 pub fn build_plan(config: &DeployerConfig) -> Result<PlanContext> {
@@ -34,7 +34,8 @@ pub fn build_plan(config: &DeployerConfig) -> Result<PlanContext> {
     );
     merge_annotation_secrets(&mut base, &manifest.meta.annotations);
     merge_annotation_oauth(&mut base, &manifest.meta.annotations, config);
-    Ok(assemble_plan(base, config))
+    let deployment = build_deployment_hints(&manifest.meta.annotations, config);
+    Ok(assemble_plan(base, config, deployment))
 }
 
 struct PackSource {
@@ -199,11 +200,39 @@ fn merge_annotation_oauth(
         .collect();
 }
 
+fn build_deployment_hints(
+    annotations: &JsonMap<String, JsonValue>,
+    config: &DeployerConfig,
+) -> DeploymentHints {
+    let mut provider = None;
+    let mut strategy = None;
+    if let Some(value) = annotations.get("greentic.deployment") {
+        match value {
+            JsonValue::String(s) => strategy = Some(s.to_string()),
+            JsonValue::Object(map) => {
+                if let Some(val) = map.get("provider").and_then(|v| v.as_str()) {
+                    provider = Some(val.to_string());
+                }
+                if let Some(val) = map.get("strategy").and_then(|v| v.as_str()) {
+                    strategy = Some(val.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    DeploymentHints {
+        provider: provider.unwrap_or_else(|| config.provider.as_str().to_string()),
+        strategy: strategy.unwrap_or_else(|| config.strategy.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Action, DeployerConfig, Provider};
     use crate::iac::IaCTool;
+    use serde_json::json;
     use std::path::PathBuf;
 
     #[test]
@@ -211,6 +240,7 @@ mod tests {
         let config = DeployerConfig {
             action: Action::Plan,
             provider: Provider::Aws,
+            strategy: "iac-only".into(),
             tenant: "acme".into(),
             environment: "staging".into(),
             pack_path: PathBuf::from("examples/acme-pack"),
@@ -226,6 +256,8 @@ mod tests {
         assert_eq!(plan.plan.runners.len(), 1);
         assert_eq!(plan.plan.secrets.len(), 2);
         assert_eq!(plan.plan.oauth.len(), 2);
+        assert_eq!(plan.deployment.provider, "aws");
+        assert_eq!(plan.deployment.strategy, "iac-only");
     }
 
     #[test]
@@ -233,6 +265,7 @@ mod tests {
         let config = DeployerConfig {
             action: Action::Plan,
             provider: Provider::Azure,
+            strategy: "iac-only".into(),
             tenant: "acmeplus".into(),
             environment: "staging".into(),
             pack_path: PathBuf::from("examples/acme-plus-pack"),
@@ -254,5 +287,31 @@ mod tests {
             "expected channel entries from connectors"
         );
         assert_eq!(plan.plan.oauth.len(), 2);
+        assert_eq!(plan.deployment.provider, "azure");
+        assert_eq!(plan.deployment.strategy, "iac-only");
+    }
+
+    #[test]
+    fn deployment_hints_respect_annotations() {
+        let mut annotations = JsonMap::new();
+        annotations.insert(
+            "greentic.deployment".into(),
+            json!({ "provider": "k8s", "strategy": "kubectl" }),
+        );
+        let config = DeployerConfig {
+            action: Action::Plan,
+            provider: Provider::Aws,
+            strategy: "iac-only".into(),
+            tenant: "acme".into(),
+            environment: "dev".into(),
+            pack_path: PathBuf::from("examples/acme-pack"),
+            yes: true,
+            preview: false,
+            dry_run: false,
+            iac_tool: IaCTool::Terraform,
+        };
+        let hints = super::build_deployment_hints(&annotations, &config);
+        assert_eq!(hints.provider, "k8s");
+        assert_eq!(hints.strategy, "kubectl");
     }
 }

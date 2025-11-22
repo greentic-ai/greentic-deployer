@@ -20,6 +20,8 @@ pub struct PlanContext {
     pub channels: Vec<ChannelContext>,
     /// Logical secrets referenced by the deployment.
     pub secrets: Vec<SecretContext>,
+    /// Deployment target hints (provider/strategy strings).
+    pub deployment: DeploymentHints,
 }
 
 impl PlanContext {
@@ -66,6 +68,13 @@ pub struct ChannelContext {
 pub struct SecretContext {
     pub key: String,
     pub scope: String,
+}
+
+/// Deployment hints used to resolve provider/strategy dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentHints {
+    pub provider: String,
+    pub strategy: String,
 }
 
 /// Builds carrier resource attributes used by telemetry-aware deployments.
@@ -155,7 +164,11 @@ pub fn build_messaging_context(plan: &DeploymentPlan) -> MessagingContext {
 }
 
 /// Creates a [`PlanContext`] bundle from the base deployment plan.
-pub fn assemble_plan(plan: DeploymentPlan, config: &DeployerConfig) -> PlanContext {
+pub fn assemble_plan(
+    plan: DeploymentPlan,
+    config: &DeployerConfig,
+    deployment: DeploymentHints,
+) -> PlanContext {
     let telemetry = build_telemetry_context(&plan, config);
     let messaging = build_messaging_context(&plan);
     let channels = build_channel_context(&plan, config);
@@ -166,5 +179,6 @@ pub fn assemble_plan(plan: DeploymentPlan, config: &DeployerConfig) -> PlanConte
         telemetry,
         channels,
         secrets,
+        deployment,
     }
 }

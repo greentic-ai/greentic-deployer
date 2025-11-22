@@ -1,7 +1,11 @@
 #![forbid(unsafe_code)]
 
+#[allow(unused_imports)]
+use greentic_interfaces_host as _greentic_interfaces_host;
+
 pub mod apply;
 pub mod config;
+pub mod deployment;
 pub mod error;
 pub mod iac;
 pub mod pack_introspect;

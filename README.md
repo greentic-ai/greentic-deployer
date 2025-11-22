@@ -72,11 +72,13 @@ Plans and provider artifacts are written to `deploy/<provider>/<tenant>/<environ
 - Minimal single-flow *application pack* with two secrets and two OAuth clients surfaced via annotations.
 - Component manifests (`components/qa/process/manifest.json`) drive secret discovery so deployment packs render the right vault references.
 - Running the CLI drops `master.tf`, `variables.tf`, and `plan.json` under `deploy/<provider>/acme/staging/`.
+- `annotations.greentic.deployment` sets the preferred deployment strategy (e.g. `"iac-only"`); when omitted, the CLI `--strategy` flag is used.
 
 ### `examples/acme-plus-pack`
 
 - Multi-flow application pack with two components (`support.automator`, `ops.router`), four secrets, two channel connectors, and explicit messaging subjects.
 - Exercising this pack produces richer IaC under `deploy/<provider>/acmeplus/staging/`.
+- Also declares `greentic.deployment.strategy = "iac-only"` so downstream tooling knows which deployment pack/flow to target by default.
 
 Both packs log telemetry via `greentic-telemetry` so plan/apply/destroy traces show up in OTLP backends.
 
@@ -131,3 +133,25 @@ Once artifacts exist and secrets are stored you can re-run them manually:
 - Publish that pack (e.g. `greentic.deploy.mycloud` with flow `deploy_mycloud_iac`).
 - Update the provider/strategy mapping so `("mycloud","iac") -> ("greentic.deploy.mycloud","deploy_mycloud_iac")`.
 - `greentic-deployer` remains provider-agnostic: it loads the application pack, builds the `DeploymentPlan`, selects the deployment pack based on `--provider/--strategy`, and delegates IaC generation to the flow via `greentic-runner`.
+- Hosts (runner/control planes) should register their executor via:
+  ```rust
+  use std::sync::Arc;
+  use greentic_deployer::deployment::{self, DeploymentDispatch, DeploymentExecutor};
+
+  struct RunnerExecutor;
+  #[async_trait::async_trait]
+  impl DeploymentExecutor for RunnerExecutor {
+      async fn execute(
+          &self,
+          config: &greentic_deployer::DeployerConfig,
+          plan: &greentic_deployer::plan::PlanContext,
+          dispatch: &DeploymentDispatch,
+      ) -> greentic_deployer::Result<()> {
+          // Call greentic-runner with (dispatch.pack_id, dispatch.flow_id) + plan JSON.
+          Ok(())
+      }
+  }
+
+  deployment::set_deployment_executor(Arc::new(RunnerExecutor));
+  ```
+  Registered executors receive the resolved `(pack_id, flow_id)` and can invoke `greentic-runner` using the shared bindings from `greentic-interfaces-host`. If no executor is registered the legacy Rust shims run as a fallback.

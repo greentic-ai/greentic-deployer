@@ -44,6 +44,9 @@ pub enum DeployerError {
         stderr: String,
     },
 
+    #[error("deployment packs not wired yet for provider={provider}, strategy={strategy}")]
+    DeploymentPackUnsupported { provider: String, strategy: String },
+
     #[error("unexpected error: {0}")]
     Other(String),
 }

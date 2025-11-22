@@ -5,13 +5,14 @@ use std::path::{Path, PathBuf};
 use tracing::{info, info_span};
 
 use crate::config::{Action, DeployerConfig};
+use crate::deployment::{DeploymentTarget, execute_deployment_pack, resolve_dispatch};
 use crate::error::Result;
 use crate::iac::{
     DefaultIaCCommandRunner, IaCCommandRunner, IaCTool, dry_run_commands, run_iac_destroy,
     run_iac_plan_apply,
 };
 use crate::pack_introspect;
-use crate::plan::SecretContext;
+use crate::plan::{PlanContext, SecretContext};
 use crate::providers::{ProviderArtifacts, ResolvedSecret, create_backend};
 use crate::secrets::SecretsContext;
 use crate::telemetry;
@@ -21,16 +22,51 @@ pub async fn run(config: DeployerConfig) -> Result<()> {
     run_with_runner(config, &DefaultIaCCommandRunner).await
 }
 
+/// Entry point used by the CLI: builds the plan from the pack and forwards to [`run_with_plan`].
 pub async fn run_with_runner(config: DeployerConfig, runner: &dyn IaCCommandRunner) -> Result<()> {
     telemetry::init(&config)?;
-
     let plan = {
         let span = stage_span("plan", &config);
         let _enter = span.enter();
         install_telemetry_context("plan", &config);
         pack_introspect::build_plan(&config)?
     };
+    run_with_plan(config, plan, runner).await
+}
+
+/// Executes a deployment given an already constructed [`PlanContext`].
+///
+/// This is the entry point greentic-runner/control planes should invoke after producing the plan.
+/// Callers are expected to have initialised telemetry already (e.g. via `telemetry::init`).
+pub async fn run_with_plan(
+    config: DeployerConfig,
+    plan: PlanContext,
+    runner: &dyn IaCCommandRunner,
+) -> Result<()> {
     info!("built deployment plan: {}", plan.summary());
+
+    let plan_target = DeploymentTarget {
+        provider: plan.deployment.provider.clone(),
+        strategy: plan.deployment.strategy.clone(),
+    };
+    if plan_target.provider != config.provider.as_str() || plan_target.strategy != config.strategy {
+        info!(
+            "deployment plan target provider={} strategy={} (cli requested {}::{})",
+            plan_target.provider,
+            plan_target.strategy,
+            config.provider.as_str(),
+            config.strategy
+        );
+    }
+    let dispatch = resolve_dispatch(&plan_target)?;
+    info!(
+        "resolved deployment pack {}::{} for provider={} strategy={}",
+        dispatch.pack_id, dispatch.flow_id, plan_target.provider, plan_target.strategy
+    );
+    if execute_deployment_pack(&config, &plan, &dispatch).await? {
+        info!("deployment plan executed via deployment pack; skipping legacy provider backend");
+        return Ok(());
+    }
 
     let backend = create_backend(config.provider, &config, &plan)?;
     let artifacts = backend.plan().await?;
