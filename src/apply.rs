@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use tracing::{info, info_span};
 
-use crate::config::{Action, DeployerConfig};
+use crate::config::{Action, DeployerConfig, OutputFormat};
 use crate::deployment::{DeploymentTarget, execute_deployment_pack, resolve_dispatch};
-use crate::error::Result;
+use crate::error::{DeployerError, Result};
 use crate::iac::{
     DefaultIaCCommandRunner, IaCCommandRunner, IaCTool, dry_run_commands, run_iac_destroy,
     run_iac_plan_apply,
@@ -17,6 +17,8 @@ use crate::providers::{ProviderArtifacts, ResolvedSecret, create_backend};
 use crate::secrets::SecretsContext;
 use crate::telemetry;
 use greentic_telemetry::{TelemetryCtx, set_current_telemetry_ctx};
+use serde_json;
+use serde_yaml_bw as serde_yaml;
 
 pub async fn run(config: DeployerConfig) -> Result<()> {
     run_with_runner(config, &DefaultIaCCommandRunner).await
@@ -77,18 +79,22 @@ pub async fn run_with_plan(
         .join(&config.tenant)
         .join(&config.environment);
 
-    println!("{}", plan.summary());
-    println!(
-        "Artifacts stored under deploy/{}/{}/{}",
-        artifacts.provider.as_str(),
-        config.tenant,
-        config.environment
-    );
+    let render_text = config.action != Action::Plan || matches!(config.output, OutputFormat::Text);
+    if render_text {
+        println!("{}", plan.summary());
+        println!(
+            "Artifacts stored under deploy/{}/{}/{}",
+            artifacts.provider.as_str(),
+            config.tenant,
+            config.environment
+        );
+    }
 
     let secrets_client = SecretsContext::discover(&config).await?;
 
     match config.action {
         Action::Plan => {
+            render_plan_output(&config, &plan)?;
             if config.preview {
                 println!("Preview mode: nothing was applied.");
             }
@@ -226,5 +232,54 @@ fn print_dry_run_commands(tool: IaCTool, destroy: bool, deploy_dir: &Path) {
     );
     for command in dry_run_commands(destroy) {
         println!("{} {}", tool.binary_name(), command.join(" "));
+    }
+}
+
+fn render_plan_output(config: &DeployerConfig, plan: &PlanContext) -> Result<()> {
+    match config.output {
+        OutputFormat::Text => {
+            print_component_summary(plan);
+        }
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(plan)
+                .map_err(|err| DeployerError::Other(err.to_string()))?;
+            println!("{json}");
+        }
+        OutputFormat::Yaml => {
+            let yaml =
+                serde_yaml::to_string(plan).map_err(|err| DeployerError::Other(err.to_string()))?;
+            println!("{yaml}");
+        }
+    }
+    Ok(())
+}
+
+fn print_component_summary(plan: &PlanContext) {
+    if plan.components.is_empty() {
+        println!("No component role/profile mappings available.");
+        return;
+    }
+
+    println!("Component mappings for target {}:", plan.target.as_str());
+    for component in &plan.components {
+        println!(
+            "- {}: role={} profile={} infra={}",
+            component.id,
+            component.role.as_str(),
+            component.profile.as_str(),
+            component.infra.summary
+        );
+        if !component.infra.resources.is_empty() {
+            println!("  resources: {}", component.infra.resources.join(", "));
+        }
+        if let Some(inference) = &component.inference {
+            if !inference.warnings.is_empty() {
+                for warning in &inference.warnings {
+                    println!("  warning: {warning}");
+                }
+            } else {
+                println!("  info: {}", inference.source);
+            }
+        }
     }
 }

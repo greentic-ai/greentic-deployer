@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use greentic_deployer::{
     apply,
-    config::{Action, DeployerConfig, Provider},
+    config::{Action, DeployerConfig, OutputFormat, Provider},
     error::DeployerError,
     iac::{IaCCommandRunner, IaCTool},
     pack_introspect,
@@ -72,6 +72,7 @@ async fn run_pack_flow(
         preview: false,
         dry_run: false,
         iac_tool: IaCTool::Terraform,
+        output: OutputFormat::Text,
     };
 
     let plan = pack_introspect::build_plan(&apply_config)?;

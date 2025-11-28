@@ -104,9 +104,11 @@ impl SecretsContext {
 
     async fn provider_resolver(&self, provider: CliProvider) -> Result<DefaultResolver> {
         let secrets_provider = match provider {
+            CliProvider::Local => SecretsProvider::Local,
             CliProvider::Aws => SecretsProvider::Aws,
             CliProvider::Azure => SecretsProvider::Azure,
             CliProvider::Gcp => SecretsProvider::Gcp,
+            CliProvider::K8s => SecretsProvider::K8s,
         };
 
         let config = ResolverConfig::new()

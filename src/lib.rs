@@ -14,7 +14,10 @@ pub mod providers;
 pub mod secrets;
 pub mod telemetry;
 
-pub use config::{Action, CliArgs, Command, DeployerConfig, Provider};
+pub use config::{Action, CliArgs, Command, DeployerConfig, OutputFormat, Provider};
 pub use error::DeployerError;
-pub use plan::{ChannelContext, MessagingContext, PlanContext, SecretContext, TelemetryContext};
+pub use plan::{
+    ChannelContext, ComponentRole, DeploymentProfile, InferenceNotes, InfraPlan, MessagingContext,
+    PlanContext, PlannedComponent, SecretContext, Target, TelemetryContext,
+};
 pub use providers::{GeneratedFile, ProviderArtifacts, ProviderBackend};

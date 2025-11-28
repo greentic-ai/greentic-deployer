@@ -37,6 +37,16 @@ pub fn default_dispatch_table() -> HashMap<DeploymentTarget, DeploymentDispatch>
     );
     map.insert(
         DeploymentTarget {
+            provider: "local".into(),
+            strategy: "iac-only".into(),
+        },
+        DeploymentDispatch {
+            pack_id: "greentic.demo.deploy.local".into(),
+            flow_id: "deploy_local_iac".into(),
+        },
+    );
+    map.insert(
+        DeploymentTarget {
             provider: "azure".into(),
             strategy: "iac-only".into(),
         },
@@ -53,6 +63,16 @@ pub fn default_dispatch_table() -> HashMap<DeploymentTarget, DeploymentDispatch>
         DeploymentDispatch {
             pack_id: "greentic.demo.deploy.gcp".into(),
             flow_id: "deploy_gcp_iac".into(),
+        },
+    );
+    map.insert(
+        DeploymentTarget {
+            provider: "k8s".into(),
+            strategy: "iac-only".into(),
+        },
+        DeploymentDispatch {
+            pack_id: "greentic.demo.deploy.k8s".into(),
+            flow_id: "deploy_k8s_iac".into(),
         },
     );
     map.insert(
@@ -271,6 +291,7 @@ mod tests {
             preview: false,
             dry_run: false,
             iac_tool: IaCTool::Terraform,
+            output: crate::config::OutputFormat::Text,
         };
         let plan = pack_introspect::build_plan(&config).expect("plan builds");
         let dispatch = DeploymentDispatch {

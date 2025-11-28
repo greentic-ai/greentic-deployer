@@ -5,13 +5,132 @@ use serde::{Deserialize, Serialize};
 
 use greentic_types::deployment::DeploymentPlan;
 
-use crate::config::DeployerConfig;
+use crate::config::{DeployerConfig, Provider};
+
+/// Generic component role derived from pack metadata and WIT worlds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentRole {
+    EventProvider,
+    EventBridge,
+    MessagingAdapter,
+    Worker,
+    Other,
+}
+
+impl ComponentRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ComponentRole::EventProvider => "event_provider",
+            ComponentRole::EventBridge => "event_bridge",
+            ComponentRole::MessagingAdapter => "messaging_adapter",
+            ComponentRole::Worker => "worker",
+            ComponentRole::Other => "other",
+        }
+    }
+}
+
+/// Abstract deployment profile used to map onto target infrastructure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentProfile {
+    LongLivedService,
+    HttpEndpoint,
+    QueueConsumer,
+    ScheduledSource,
+    OneShotJob,
+}
+
+impl DeploymentProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeploymentProfile::LongLivedService => "long_lived_service",
+            DeploymentProfile::HttpEndpoint => "http_endpoint",
+            DeploymentProfile::QueueConsumer => "queue_consumer",
+            DeploymentProfile::ScheduledSource => "scheduled_source",
+            DeploymentProfile::OneShotJob => "one_shot_job",
+        }
+    }
+}
+
+/// Supported deployment targets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Target {
+    Local,
+    Aws,
+    Azure,
+    Gcp,
+    K8s,
+}
+
+impl Target {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Target::Local => "local",
+            Target::Aws => "aws",
+            Target::Azure => "azure",
+            Target::Gcp => "gcp",
+            Target::K8s => "k8s",
+        }
+    }
+}
+
+impl From<Provider> for Target {
+    fn from(value: Provider) -> Self {
+        match value {
+            Provider::Local => Target::Local,
+            Provider::Aws => Target::Aws,
+            Provider::Azure => Target::Azure,
+            Provider::Gcp => Target::Gcp,
+            Provider::K8s => Target::K8s,
+        }
+    }
+}
+
+/// Per-component planning entry with inferred role/profile and infra summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannedComponent {
+    pub id: String,
+    pub role: ComponentRole,
+    pub profile: DeploymentProfile,
+    pub target: Target,
+    pub infra: InfraPlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference: Option<InferenceNotes>,
+}
+
+/// Target-specific infrastructure mapping for a component.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InfraPlan {
+    pub target: Target,
+    pub profile: DeploymentProfile,
+    /// Short human-readable mapping summary (e.g. "api-gateway + lambda").
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// Inference details attached to a component entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceNotes {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
 
 /// Provider-agnostic deployment plan bundle enriched with deployer hints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanContext {
     /// Canonical plan produced by `greentic-types`.
     pub plan: DeploymentPlan,
+    /// Target selected for planning/rendering.
+    pub target: Target,
+    /// Per-component deployment mapping (role + profile).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<PlannedComponent>,
     /// Messaging hints inferred from tenant/environment.
     pub messaging: MessagingContext,
     /// Telemetry hints applied to generated artifacts.
@@ -28,13 +147,15 @@ impl PlanContext {
     /// Returns a compact summary string for CLI output.
     pub fn summary(&self) -> String {
         format!(
-            "Plan for {} @ {}: {} runners, {} channels, {} secrets, {} oauth clients",
+            "Plan for {} @ {} (target {}): {} runners, {} channels, {} secrets, {} oauth clients, {} components",
             self.plan.tenant,
             self.plan.environment,
+            self.target.as_str(),
             self.plan.runners.len(),
             self.plan.channels.len(),
             self.secrets.len(),
-            self.plan.oauth.len()
+            self.plan.oauth.len(),
+            self.components.len()
         )
     }
 }
@@ -73,6 +194,7 @@ pub struct SecretContext {
 /// Deployment hints used to resolve provider/strategy dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentHints {
+    pub target: Target,
     pub provider: String,
     pub strategy: String,
 }
@@ -168,6 +290,7 @@ pub fn assemble_plan(
     plan: DeploymentPlan,
     config: &DeployerConfig,
     deployment: DeploymentHints,
+    components: Vec<PlannedComponent>,
 ) -> PlanContext {
     let telemetry = build_telemetry_context(&plan, config);
     let messaging = build_messaging_context(&plan);
@@ -175,6 +298,8 @@ pub fn assemble_plan(
     let secrets = build_secret_context(&plan);
     PlanContext {
         plan,
+        target: deployment.target.clone(),
+        components,
         messaging,
         telemetry,
         channels,

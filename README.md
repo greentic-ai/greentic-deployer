@@ -1,6 +1,6 @@
 # Greentic Deployer
 
-`greentic-deployer` is a CLI and library that builds cloud-agnostic deployment plans for Greentic packs and then runs provider-specific *deployment packs* (kind `deployment`) to materialise the required IaC/artifacts for AWS, Azure, GCP, or any other target.
+`greentic-deployer` is a CLI and library that builds cloud-agnostic deployment plans for Greentic packs and then runs provider-specific *deployment packs* (kind `deployment`) to materialise the required IaC/artifacts for AWS, Azure, GCP, local, K8s, or any other target.
 
 ## Concepts
 
@@ -8,6 +8,7 @@
 - **DeploymentPlan** is a provider-agnostic model (`greentic-types::DeploymentPlan`) that captures messaging topology, runner services, channel ingress, secrets, OAuth redirect URLs, and telemetry hooks.
 - **Deployment packs** (kind `deployment`) supply provider-specific deployment flows. Each flow is a `type: events` flow made of deployment components (`supports: ["events"]`, `world: "greentic:deploy-plan@1.0.0"`) that can read the plan via `get-deployment-plan()` and emit IaC/templates when the host grants `host.iac.write_templates`.
 - **Providers / strategies** are a mapping (`provider`, `strategy`) → `(deployment_pack_id, deploy_flow_id)`; e.g. `("aws","serverless") -> ("greentic.deploy.aws","deploy_aws_serverless")`. `greentic-deployer` chooses the mapping for the requested `--provider`/`--strategy`, loads that deployment pack, and executes it via `greentic-runner`.
+- Legacy Rust backends exist for AWS/Azure/GCP; Local/K8s currently require deployment packs + a registered executor and will return `DeploymentPackUnsupported` if no executor is present.
 
 ## Building
 
@@ -18,9 +19,10 @@ cargo build -p greentic-deployer
 ## CLI
 
 ```
-greentic-deployer <plan|apply|destroy> --provider <aws|azure|gcp> \
+greentic-deployer <plan|apply|destroy> --provider <local|aws|azure|gcp|k8s> \
   --tenant <tenant-id> --environment <env> --pack <path> \
-  [--yes] [--preview] [--dry-run] [--iac-tool <tf|terraform|tofu|opentofu>]
+  [--yes] [--preview] [--dry-run] [--iac-tool <tf|terraform|tofu|opentofu>] \
+  [--output <text|json|yaml>]
 ```
 
 Examples:
@@ -37,8 +39,14 @@ greentic-deployer apply --provider aws --tenant acme --environment staging --pac
   ```bash
 greentic-deployer destroy --provider aws --tenant acme --environment staging --pack examples/acme-pack
 ```
+- Plan locally (requires a deployment pack + executor for local targets):
+  ```bash
+  greentic-deployer plan --provider local --tenant acme --environment dev --pack examples/acme-pack --output json
+  ```
 
 Plans and provider artifacts are written to `deploy/<provider>/<tenant>/<environment>/` for inspection.
+Plan output also lists component role/profile mappings per target; use `--output json` or `--output yaml` for machine-readable summaries.
+For Local/K8s targets, wire in a deployment pack + executor (or extend the provider mapping) because legacy shims are only available for AWS/Azure/GCP.
 
 ## Configuration
 
@@ -116,7 +124,7 @@ Once artifacts exist and secrets are stored you can re-run them manually:
 
 ## CI smoke test
 
-- `scripts/ci-smoke.sh` iterates over providers (`aws/azure/gcp`), actions (`apply/destroy`), and both packs in `--dry-run` mode to guarantee IaC command generation works.
+- `scripts/ci-smoke.sh` iterates over providers (`aws/azure/gcp`), actions (`apply/destroy`), and both packs in `--dry-run` mode to guarantee IaC command generation works. Local/K8s are not covered by the legacy shims and require a deployment pack executor.
 - `./ci/local_check.sh` is the local equivalent run before pushing (fmt, clippy, tests, docs, and the smoke script).
 
 ## Sample IaC output / deployment packs

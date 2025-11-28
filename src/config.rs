@@ -25,28 +25,41 @@ impl Action {
     }
 }
 
-/// Supported cloud providers.
+/// Supported deployment targets.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Provider {
+    Local,
     Aws,
     Azure,
     Gcp,
+    K8s,
 }
 
 impl Provider {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Provider::Local => "local",
             Provider::Aws => "aws",
             Provider::Azure => "azure",
             Provider::Gcp => "gcp",
+            Provider::K8s => "k8s",
         }
     }
+}
+
+/// Output format for CLI commands.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum OutputFormat {
+    #[default]
+    Text,
+    Json,
+    Yaml,
 }
 
 /// Per-command configuration helpers.
 #[derive(Debug, Args)]
 pub struct ActionArgs {
-    /// Cloud provider to target (aws|azure|gcp).
+    /// Deployment target (local|aws|azure|gcp|k8s).
     #[arg(long, value_enum)]
     pub provider: Provider,
 
@@ -81,6 +94,10 @@ pub struct ActionArgs {
     /// IaC tool to use (tf/terraform or tofu/opentofu).
     #[arg(long, value_enum)]
     pub iac_tool: Option<IacToolArg>,
+
+    /// Output format for plan/rendering (text|json|yaml).
+    #[arg(long, value_enum, default_value = "text")]
+    pub output: OutputFormat,
 }
 
 /// Top-level CLI structure.
@@ -119,6 +136,7 @@ pub struct DeployerConfig {
     pub preview: bool,
     pub dry_run: bool,
     pub iac_tool: IaCTool,
+    pub output: OutputFormat,
 }
 
 impl DeployerConfig {
@@ -154,6 +172,7 @@ impl DeployerConfig {
             preview: args.preview,
             dry_run: args.dry_run,
             iac_tool,
+            output: args.output,
         })
     }
 }

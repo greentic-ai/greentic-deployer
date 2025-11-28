@@ -186,5 +186,11 @@ pub fn create_backend(
         Provider::Aws => Ok(Box::new(AwsBackend::new(config.clone(), plan.clone()))),
         Provider::Azure => Ok(Box::new(AzureBackend::new(config.clone(), plan.clone()))),
         Provider::Gcp => Ok(Box::new(GcpBackend::new(config.clone(), plan.clone()))),
+        Provider::Local | Provider::K8s => {
+            Err(crate::error::DeployerError::DeploymentPackUnsupported {
+                provider: provider.as_str().to_string(),
+                strategy: plan.deployment.strategy.clone(),
+            })
+        }
     }
 }
