@@ -19,3 +19,11 @@ jobs:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: ./ci/local_check.sh
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: local-check
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+    steps:
+      - name: Start deploy after CI success
+        run: echo "Deploy started (CI passed on master)"
