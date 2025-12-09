@@ -12,6 +12,24 @@ use crate::plan::{PlanContext, SecretContext};
 use crate::providers::{ApplyManifest, ProviderArtifacts, ProviderBackend, ResolvedSecret};
 use greentic_types::deployment::RunnerPlan;
 
+fn runner_cpu_cores(runner: &RunnerPlan) -> String {
+    let millis = runner
+        .capabilities
+        .get("cpu_millis")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(500);
+    format!("{:.2}", (millis as f64) / 1000.0)
+}
+
+fn runner_memory_gib(runner: &RunnerPlan) -> String {
+    let mb = runner
+        .capabilities
+        .get("memory_mb")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1024);
+    format!("{:.2}Gi", (mb as f64) / 1024.0)
+}
+
 /// Azure-specific backend stub.
 #[derive(Clone)]
 pub struct AzureBackend {
@@ -22,6 +40,13 @@ pub struct AzureBackend {
 impl AzureBackend {
     pub fn new(config: DeployerConfig, plan: PlanContext) -> Self {
         Self { config, plan }
+    }
+
+    fn is_external_component(&self, runner: &RunnerPlan) -> bool {
+        self.plan
+            .external_components
+            .iter()
+            .any(|id| id == &runner.name)
     }
 
     fn render_main_bicep(&self) -> String {
@@ -92,7 +117,12 @@ impl AzureBackend {
 
                 writeln!(
                     &mut body,
-                    "\nresource {} 'Microsoft.Web/containerApps@2023-08-01' = {{",
+                    "\n{}resource {} 'Microsoft.Web/containerApps@2023-08-01' = {{",
+                    if self.is_external_component(runner) {
+                        "// External-facing component\n"
+                    } else {
+                        ""
+                    },
                     resource
                 )
                 .ok();
@@ -108,6 +138,13 @@ impl AzureBackend {
                 body.push_str(&secrets_block);
                 writeln!(&mut body, "    }}").ok();
                 writeln!(&mut body, "    template: {{").ok();
+                writeln!(
+                    &mut body,
+                    "      scale: {{ minReplicas: {}, maxReplicas: {} }}",
+                    runner.replicas.max(1),
+                    runner.replicas.max(1)
+                )
+                .ok();
                 writeln!(&mut body, "      containers: [").ok();
                 writeln!(&mut body, "        {{").ok();
                 writeln!(
@@ -120,6 +157,13 @@ impl AzureBackend {
                 writeln!(&mut body, "          env: [").ok();
                 writeln!(&mut body, "{}", env_block).ok();
                 writeln!(&mut body, "          ]").ok();
+                writeln!(
+                    &mut body,
+                    "          resources: {{ requests: {{ cpu: '{}', memory: '{}' }} }}",
+                    runner_cpu_cores(runner),
+                    runner_memory_gib(runner)
+                )
+                .ok();
                 writeln!(&mut body, "        }}").ok();
                 writeln!(&mut body, "      ]").ok();
                 writeln!(&mut body, "    }}").ok();

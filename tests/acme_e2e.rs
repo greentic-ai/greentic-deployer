@@ -1,170 +1,215 @@
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
+use greentic_deployer::pack_introspect::build_plan;
 use greentic_deployer::{
-    apply,
     config::{Action, DeployerConfig, OutputFormat, Provider},
-    error::DeployerError,
-    iac::{IaCCommandRunner, IaCTool},
-    pack_introspect,
-    plan::PlanContext,
-    secrets::{clear_test_secrets, register_test_secret},
+    iac::IaCTool,
 };
-use std::process::Command;
+use greentic_types::SemverReq;
+use greentic_types::cbor::encode_pack_manifest;
+use greentic_types::component::{ComponentCapabilities, ComponentManifest, ComponentProfiles};
+use greentic_types::flow::{
+    ComponentRef, Flow, FlowHasher, FlowKind, FlowMetadata, InputMapping, Node, OutputMapping,
+    Routing,
+};
+use greentic_types::pack_manifest::{PackDependency, PackKind, PackManifest};
+use greentic_types::{ComponentId, FlowId, NodeId, PackId};
+use indexmap::IndexMap;
+use semver::Version;
+use tar::Builder;
+use tempfile::tempdir_in;
 
-struct TestRunner {
-    calls: Arc<Mutex<Vec<Vec<String>>>>,
-}
-
-impl TestRunner {
-    fn new() -> Self {
-        Self {
-            calls: Arc::new(Mutex::new(Vec::new())),
-        }
+fn sample_component(id: &str, http_server: bool) -> ComponentManifest {
+    let host_caps = greentic_types::component::HostCapabilities {
+        http: Some(greentic_types::component::HttpCapabilities {
+            client: true,
+            server: http_server,
+        }),
+        ..Default::default()
+    };
+    ComponentManifest {
+        id: ComponentId::from_str(id).unwrap(),
+        version: Version::new(0, 1, 0),
+        supports: vec![FlowKind::Messaging, FlowKind::Http],
+        world: "greentic:test/world".to_string(),
+        profiles: ComponentProfiles {
+            default: Some("http_endpoint".to_string()),
+            supported: vec![
+                "http_endpoint".to_string(),
+                "long_lived_service".to_string(),
+            ],
+        },
+        capabilities: ComponentCapabilities {
+            host: host_caps,
+            ..Default::default()
+        },
+        configurators: None,
+        operations: Vec::new(),
+        config_schema: None,
+        resources: Default::default(),
     }
+}
 
-    fn calls(&self) -> Vec<Vec<String>> {
-        self.calls.lock().unwrap().clone()
+fn sample_flow(id: &str, kind: FlowKind, component: &ComponentManifest) -> Flow {
+    let mut nodes: IndexMap<NodeId, Node, FlowHasher> = IndexMap::default();
+    nodes.insert(
+        NodeId::from_str("start").unwrap(),
+        Node {
+            id: NodeId::from_str("start").unwrap(),
+            component: ComponentRef {
+                id: component.id.clone(),
+                pack_alias: None,
+                operation: None,
+            },
+            input: InputMapping {
+                mapping: serde_json::Value::Null,
+            },
+            output: OutputMapping {
+                mapping: serde_json::Value::Null,
+            },
+            routing: Routing::End,
+            telemetry: Default::default(),
+        },
+    );
+
+    let mut entrypoints = BTreeMap::new();
+    entrypoints.insert("default".to_string(), serde_json::Value::Null);
+
+    Flow {
+        schema_version: "flowir-v1".to_string(),
+        id: FlowId::from_str(id).unwrap(),
+        kind,
+        entrypoints,
+        nodes,
+        metadata: FlowMetadata::default(),
     }
 }
 
-impl IaCCommandRunner for TestRunner {
-    fn run(&self, _tool: IaCTool, _dir: &Path, args: &[&str]) -> Result<(), DeployerError> {
-        let mut guard = self.calls.lock().unwrap();
-        guard.push(args.iter().map(|s| s.to_string()).collect());
-        Ok(())
+fn sample_manifest() -> PackManifest {
+    let http_component = sample_component("dev.greentic.http", true);
+    let msg_component = sample_component("dev.greentic.msg", false);
+
+    let flows = vec![
+        greentic_types::pack_manifest::PackFlowEntry {
+            id: FlowId::from_str("chat_flow").unwrap(),
+            kind: FlowKind::Messaging,
+            flow: sample_flow("chat_flow", FlowKind::Messaging, &msg_component),
+            tags: vec!["messaging".to_string()],
+            entrypoints: vec!["default".to_string()],
+        },
+        greentic_types::pack_manifest::PackFlowEntry {
+            id: FlowId::from_str("http_flow").unwrap(),
+            kind: FlowKind::Http,
+            flow: sample_flow("http_flow", FlowKind::Http, &http_component),
+            tags: vec!["http".to_string()],
+            entrypoints: vec!["default".to_string()],
+        },
+    ];
+
+    PackManifest {
+        schema_version: "pack-v1".to_string(),
+        pack_id: PackId::from_str("dev.greentic.sample").unwrap(),
+        version: Version::new(0, 1, 0),
+        kind: PackKind::Application,
+        publisher: "greentic".to_string(),
+        components: vec![http_component, msg_component],
+        flows,
+        dependencies: vec![PackDependency {
+            alias: "common".to_string(),
+            pack_id: PackId::from_str("dev.greentic.common").unwrap(),
+            version_req: SemverReq::parse("*").unwrap(),
+            required_capabilities: vec![],
+        }],
+        capabilities: Vec::new(),
+        signatures: Default::default(),
     }
 }
 
-async fn seed_secrets(config: &DeployerConfig, plan: &PlanContext) -> Result<(), DeployerError> {
-    clear_test_secrets();
-    for spec in &plan.secrets {
-        register_test_secret(
-            &config.environment,
-            &config.tenant,
-            &spec.key,
-            &format!("test-value-{}", spec.key),
-        );
-    }
-    Ok(())
+fn write_gtpack_tar(manifest: &PackManifest, path: &Path) {
+    let encoded = encode_pack_manifest(manifest).expect("encode manifest");
+    let mut builder = Builder::new(Vec::new());
+
+    let mut manifest_header = tar::Header::new_gnu();
+    manifest_header.set_size(encoded.len() as u64);
+    manifest_header.set_mode(0o644);
+    manifest_header.set_cksum();
+    builder
+        .append_data(&mut manifest_header, "manifest.cbor", encoded.as_slice())
+        .expect("append manifest");
+
+    let dummy = b"wasm";
+    let mut comp_header = tar::Header::new_gnu();
+    comp_header.set_size(dummy.len() as u64);
+    comp_header.set_mode(0o644);
+    comp_header.set_cksum();
+    builder
+        .append_data(
+            &mut comp_header,
+            "components/dev.greentic.http.wasm",
+            dummy.as_slice(),
+        )
+        .expect("append component");
+
+    let bytes = builder.into_inner().expect("tar bytes");
+    let mut file = fs::File::create(path).expect("create tar");
+    file.write_all(&bytes).expect("write tar");
 }
 
-fn cleanup_deploy() {
-    let _ = fs::remove_dir_all("deploy");
+fn write_directory_pack(manifest: &PackManifest, root: &Path) {
+    let encoded = encode_pack_manifest(manifest).expect("encode manifest");
+    fs::create_dir_all(root.join("components")).expect("mkdir components");
+    fs::write(root.join("manifest.cbor"), encoded).expect("write manifest");
+    fs::write(root.join("components/dev.greentic.http.wasm"), b"wasm").expect("write component");
 }
 
-async fn run_pack_flow(
-    provider: Provider,
-    tenant: &str,
-    pack_path: &str,
-) -> Result<(), DeployerError> {
-    cleanup_deploy();
-
-    let apply_config = DeployerConfig {
-        action: Action::Apply,
-        provider,
+fn default_config(pack_path: PathBuf) -> DeployerConfig {
+    DeployerConfig {
+        action: Action::Plan,
+        provider: Provider::Aws,
         strategy: "iac-only".into(),
-        tenant: tenant.into(),
-        environment: "staging".into(),
-        pack_path: pack_path.into(),
+        tenant: "acme".into(),
+        environment: "dev".into(),
+        pack_path,
+        pack_ref: None,
+        distributor_url: None,
+        distributor_token: None,
         yes: true,
         preview: false,
         dry_run: false,
         iac_tool: IaCTool::Terraform,
         output: OutputFormat::Text,
-    };
-
-    let plan = pack_introspect::build_plan(&apply_config)?;
-    seed_secrets(&apply_config, &plan).await?;
-    let runner = TestRunner::new();
-
-    let deploy_root = Path::new("deploy")
-        .join(apply_config.provider.as_str())
-        .join(&apply_config.tenant)
-        .join(&apply_config.environment);
-
-    apply::run_with_runner(apply_config.clone(), &runner).await?;
-    let apply_manifest_path = deploy_root.join("apply-manifest.json");
-    assert!(apply_manifest_path.exists());
-    let manifest_json = fs::read_to_string(&apply_manifest_path).expect("apply manifest readable");
-    let manifest: serde_json::Value =
-        serde_json::from_str(&manifest_json).expect("apply manifest parses");
-    let secrets = manifest
-        .get("secrets")
-        .and_then(|value| value.as_array())
-        .expect("secrets array present");
-    assert!(!secrets.is_empty(), "expected secrets recorded in manifest");
-    let oauth_clients = manifest
-        .get("oauth_clients")
-        .and_then(|value| value.as_array())
-        .expect("oauth_clients array present");
-    assert!(
-        !oauth_clients.is_empty(),
-        "expected oauth clients recorded in apply manifest"
-    );
-    assert_eq!(runner.calls().len(), 3);
-
-    let destroy_config = DeployerConfig {
-        action: Action::Destroy,
-        ..apply_config
-    };
-
-    apply::run_with_runner(destroy_config, &runner).await?;
-    assert!(deploy_root.join("destroy-manifest.json").exists());
-    assert_eq!(runner.calls().len(), 5);
-
-    cleanup_deploy();
-    Ok(())
-}
-
-#[tokio::test]
-async fn packs_end_to_end_all_providers() -> Result<(), DeployerError> {
-    let packs = [
-        ("acme", "examples/acme-pack"),
-        ("acmeplus", "examples/acme-plus-pack"),
-    ];
-    for provider in [Provider::Aws, Provider::Azure, Provider::Gcp] {
-        for (tenant, pack) in packs {
-            run_pack_flow(provider, tenant, pack).await?;
-        }
     }
-    Ok(())
 }
 
 #[test]
-fn dry_run_cli_smoke_test() {
-    let binary = env!("CARGO_BIN_EXE_greentic-deployer");
-    let packs = [
-        ("acme", "examples/acme-pack"),
-        ("acmeplus", "examples/acme-plus-pack"),
-    ];
-    for provider in ["aws", "azure", "gcp"] {
-        for (tenant, pack) in packs {
-            for action in ["apply", "destroy"] {
-                cleanup_deploy();
-                let status = Command::new(binary)
-                    .args([
-                        action,
-                        "--provider",
-                        provider,
-                        "--tenant",
-                        tenant,
-                        "--environment",
-                        "staging",
-                        "--pack",
-                        pack,
-                        "--dry-run",
-                        "--yes",
-                    ])
-                    .status()
-                    .expect("spawn greentic-deployer");
-                assert!(
-                    status.success(),
-                    "dry-run {action} for {provider} ({tenant}) failed with status {status:?}"
-                );
-            }
-        }
-    }
-    cleanup_deploy();
+fn builds_plan_from_tar_gtpack() {
+    let manifest = sample_manifest();
+    let cwd = std::env::current_dir().expect("cwd");
+    let dir = tempdir_in(cwd).expect("temp dir");
+    let tar_path = dir.path().join("sample.gtpack");
+    write_gtpack_tar(&manifest, &tar_path);
+
+    let config = default_config(tar_path);
+    let plan = build_plan(&config).expect("plan builds");
+    assert_eq!(plan.plan.pack_id, manifest.pack_id.to_string());
+    assert!(!plan.plan.channels.is_empty());
+    assert!(!plan.components.is_empty());
+}
+
+#[test]
+fn builds_plan_from_directory_pack() {
+    let manifest = sample_manifest();
+    let cwd = std::env::current_dir().expect("cwd");
+    let dir = tempdir_in(cwd).expect("temp dir");
+    write_directory_pack(&manifest, dir.path());
+
+    let config = default_config(dir.path().to_path_buf());
+    let plan = build_plan(&config).expect("plan builds");
+    assert_eq!(plan.plan.pack_version, manifest.version);
+    assert_eq!(plan.target, greentic_deployer::plan::Target::Aws);
+    assert_eq!(plan.plan.tenant, "acme");
 }

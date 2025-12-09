@@ -14,7 +14,7 @@ for provider in "${providers[@]}"; do
     pack_path="${pack_entry#*:}"
     for action in "${actions[@]}"; do
       echo "==> greentic-deployer ${action} --provider ${provider} --tenant ${tenant} (dry-run)"
-      cargo run -p greentic-deployer -- "${action}" \
+      cargo run -p greentic-deployer --bin greentic-deployer -- "${action}" \
         --provider "${provider}" \
         --tenant "${tenant}" \
         --environment staging \

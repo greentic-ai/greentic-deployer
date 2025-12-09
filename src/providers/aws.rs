@@ -14,6 +14,24 @@ use greentic_types::deployment::RunnerPlan;
 
 const DEFAULT_CPU_MILLIS: u32 = 512;
 const DEFAULT_MEMORY_MB: u32 = 1024;
+
+fn runner_cpu_millis(runner: &RunnerPlan) -> u32 {
+    runner
+        .capabilities
+        .get("cpu_millis")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(DEFAULT_CPU_MILLIS)
+}
+
+fn runner_memory_mb(runner: &RunnerPlan) -> u32 {
+    runner
+        .capabilities
+        .get("memory_mb")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(DEFAULT_MEMORY_MB)
+}
 use crate::providers::{ApplyManifest, ProviderArtifacts, ProviderBackend, ResolvedSecret};
 
 /// AWS-specific backend.
@@ -24,6 +42,13 @@ pub struct AwsBackend {
 }
 
 impl AwsBackend {
+    fn is_external_component(&self, runner: &RunnerPlan) -> bool {
+        self.plan
+            .external_components
+            .iter()
+            .any(|id| id == &runner.name)
+    }
+
     pub fn new(config: DeployerConfig, plan: PlanContext) -> Self {
         Self { config, plan }
     }
@@ -218,13 +243,18 @@ impl AwsBackend {
 
             writeln!(
                 &mut block,
-                "resource \"aws_ecs_task_definition\" \"{}\" {{",
+                "{}resource \"aws_ecs_task_definition\" \"{}\" {{",
+                if self.is_external_component(runner) {
+                    "# External-facing component\n"
+                } else {
+                    ""
+                },
                 resource_name
             )
             .ok();
             writeln!(&mut block, "  family = \"{}\"", container_name).ok();
-            writeln!(&mut block, "  cpu = \"{}\"", DEFAULT_CPU_MILLIS).ok();
-            writeln!(&mut block, "  memory = \"{}\"", DEFAULT_MEMORY_MB).ok();
+            writeln!(&mut block, "  cpu = \"{}\"", runner_cpu_millis(runner)).ok();
+            writeln!(&mut block, "  memory = \"{}\"", runner_memory_mb(runner)).ok();
             writeln!(
                 &mut block,
                 "  requires_compatibilities = [\"FARGATE\"]\n  network_mode = \"awsvpc\""
@@ -257,7 +287,7 @@ impl AwsBackend {
                 resource_name
             )
             .ok();
-            writeln!(&mut block, "  desired_count = 1").ok();
+            writeln!(&mut block, "  desired_count = {}", runner.replicas.max(1)).ok();
             writeln!(&mut block, "}}\n").ok();
         }
 

@@ -210,9 +210,16 @@ mod tests {
     use crate::config::{Action, DeployerConfig, Provider};
     use crate::iac::IaCTool;
     use crate::pack_introspect;
+    use greentic_types::cbor::encode_pack_manifest;
+    use greentic_types::component::{ComponentCapabilities, ComponentManifest, ComponentProfiles};
+    use greentic_types::pack_manifest::{PackKind, PackManifest};
+    use greentic_types::{ComponentId, PackId};
+    use semver::Version;
+    use std::env;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::tempdir_in;
 
     #[test]
     fn resolves_default_entry() {
@@ -280,13 +287,17 @@ mod tests {
         clear_deployment_executor();
         let hits = Arc::new(AtomicUsize::new(0));
         set_deployment_executor(Arc::new(TestExecutor { hits: hits.clone() }));
+        let pack_path = write_test_pack();
         let config = DeployerConfig {
             action: Action::Plan,
             provider: Provider::Aws,
             strategy: "iac-only".into(),
             tenant: "acme".into(),
             environment: "staging".into(),
-            pack_path: PathBuf::from("examples/acme-pack"),
+            pack_path,
+            pack_ref: None,
+            distributor_url: None,
+            distributor_token: None,
             yes: true,
             preview: false,
             dry_run: false,
@@ -304,5 +315,36 @@ mod tests {
         assert!(ran);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         clear_deployment_executor();
+    }
+
+    #[allow(deprecated)]
+    fn write_test_pack() -> PathBuf {
+        let dir = tempdir_in(env::current_dir().expect("cwd")).expect("temp dir");
+        let manifest = PackManifest {
+            schema_version: "pack-v1".to_string(),
+            pack_id: PackId::try_from("dev.greentic.sample").unwrap(),
+            version: Version::new(0, 1, 0),
+            kind: PackKind::Application,
+            publisher: "greentic".to_string(),
+            components: vec![ComponentManifest {
+                id: ComponentId::try_from("dev.greentic.component").unwrap(),
+                version: Version::new(0, 1, 0),
+                supports: Vec::new(),
+                world: "greentic:test/world".to_string(),
+                profiles: ComponentProfiles::default(),
+                capabilities: ComponentCapabilities::default(),
+                configurators: None,
+                operations: Vec::new(),
+                config_schema: None,
+                resources: Default::default(),
+            }],
+            flows: Vec::new(),
+            dependencies: Vec::new(),
+            capabilities: Vec::new(),
+            signatures: Default::default(),
+        };
+        let bytes = encode_pack_manifest(&manifest).expect("encode manifest");
+        std::fs::write(dir.path().join("manifest.cbor"), bytes).expect("write manifest");
+        dir.into_path()
     }
 }

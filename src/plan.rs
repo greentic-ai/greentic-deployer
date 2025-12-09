@@ -128,6 +128,9 @@ pub struct PlanContext {
     pub plan: DeploymentPlan,
     /// Target selected for planning/rendering.
     pub target: Target,
+    /// Components that expose inbound surfaces (messaging/http/events).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_components: Vec<String>,
     /// Per-component deployment mapping (role + profile).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub components: Vec<PlannedComponent>,
@@ -290,6 +293,7 @@ pub fn assemble_plan(
     plan: DeploymentPlan,
     config: &DeployerConfig,
     deployment: DeploymentHints,
+    external_components: Vec<String>,
     components: Vec<PlannedComponent>,
 ) -> PlanContext {
     let telemetry = build_telemetry_context(&plan, config);
@@ -299,6 +303,7 @@ pub fn assemble_plan(
     PlanContext {
         plan,
         target: deployment.target.clone(),
+        external_components,
         components,
         messaging,
         telemetry,

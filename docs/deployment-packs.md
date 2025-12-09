@@ -50,3 +50,18 @@ Each profile maps to target-specific infra primitives, still without knowing any
 Local/K8s note: the legacy Rust backends only cover AWS/Azure/GCP. For `local` and `k8s` targets you need a deployment pack plus a registered executor (or extend the provider/strategy mapping to point at your pack) so the deployer can delegate IaC generation.
 
 CLI plans now surface these mappings (and inference warnings) and can be rendered as text, JSON, or YAML via `--output text|json|yaml`.
+
+## Authoring flows
+
+For the YGTC flow authoring format and schema notes, see `docs/flow-authoring.md`.
+
+## Loading packs
+
+- Local files/directories: `--pack <path>` continues to work.
+- Registry/distributor: use `--pack-id`, `--pack-version`, and `--pack-digest` plus `--distributor-url` (and optionally `--distributor-token`) to resolve packs from a distributor. Programmatic callers can also register a distributor source via `set_distributor_source`.
+- The default HTTP source posts to `/distributor-api/pack` with `pack_id` and `version` and retries on transient errors.
+
+### Notes for distributors
+
+- The HTTP fetcher is intentionally minimal. If your distributor API differs, register a custom `DistributorSource` via `set_distributor_source` before calling `build_plan`.
+- `reqwest` is used in blocking mode by default; swap in an async source if needed.

@@ -2,6 +2,8 @@ use std::env;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use greentic_types::pack::PackRef;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{DeployerError, Result};
@@ -79,6 +81,26 @@ pub struct ActionArgs {
     #[arg(long)]
     pub pack: PathBuf,
 
+    /// Optional pack identifier to resolve from a distributor/registry.
+    #[arg(long)]
+    pub pack_id: Option<String>,
+
+    /// Pack version to resolve from a distributor/registry (requires --pack-id).
+    #[arg(long)]
+    pub pack_version: Option<String>,
+
+    /// Pack digest to resolve from a distributor/registry (requires --pack-id).
+    #[arg(long)]
+    pub pack_digest: Option<String>,
+
+    /// Optional distributor base URL for registry resolution.
+    #[arg(long)]
+    pub distributor_url: Option<String>,
+
+    /// Optional auth token for the distributor.
+    #[arg(long)]
+    pub distributor_token: Option<String>,
+
     /// Skip interactive confirmations (defaults to false).
     #[arg(long, default_value_t = false)]
     pub yes: bool,
@@ -132,6 +154,9 @@ pub struct DeployerConfig {
     pub tenant: String,
     pub environment: String,
     pub pack_path: PathBuf,
+    pub pack_ref: Option<PackRef>,
+    pub distributor_url: Option<String>,
+    pub distributor_token: Option<String>,
     pub yes: bool,
     pub preview: bool,
     pub dry_run: bool,
@@ -149,17 +174,19 @@ impl DeployerConfig {
 
         let environment = args
             .environment
+            .clone()
             .or_else(|| env::var("GREENTIC_ENV").ok())
             .unwrap_or_else(|| "dev".to_string());
 
-        if !args.pack.exists() {
+        if !args.pack.exists() && args.pack_id.is_none() {
             return Err(DeployerError::Config(format!(
-                "pack path {} does not exist",
+                "pack path {} does not exist (and no --pack-id provided)",
                 args.pack.display()
             )));
         }
 
         let iac_tool = resolve_iac_tool(args.iac_tool, env::var("GREENTIC_IAC_TOOL").ok())?;
+        let pack_ref = build_pack_ref(&args)?;
 
         Ok(Self {
             action,
@@ -168,6 +195,13 @@ impl DeployerConfig {
             tenant: args.tenant,
             environment,
             pack_path: args.pack,
+            pack_ref,
+            distributor_url: args
+                .distributor_url
+                .or_else(|| env::var("GREENTIC_DISTRIBUTOR_URL").ok()),
+            distributor_token: args
+                .distributor_token
+                .or_else(|| env::var("GREENTIC_DISTRIBUTOR_TOKEN").ok()),
             yes: args.yes,
             preview: args.preview,
             dry_run: args.dry_run,
@@ -175,6 +209,22 @@ impl DeployerConfig {
             output: args.output,
         })
     }
+}
+
+fn build_pack_ref(args: &ActionArgs) -> Result<Option<PackRef>> {
+    let Some(pack_id) = args.pack_id.as_ref() else {
+        return Ok(None);
+    };
+    let version_str = args.pack_version.as_ref().ok_or_else(|| {
+        DeployerError::Config("when using --pack-id you must set --pack-version".into())
+    })?;
+    let digest = args.pack_digest.as_ref().ok_or_else(|| {
+        DeployerError::Config("when using --pack-id you must set --pack-digest".into())
+    })?;
+    let version = Version::parse(version_str).map_err(|err| {
+        DeployerError::Config(format!("invalid pack version '{}': {}", version_str, err))
+    })?;
+    Ok(Some(PackRef::new(pack_id.clone(), version, digest.clone())))
 }
 
 #[cfg(test)]
@@ -214,5 +264,35 @@ mod tests {
         let cli = CliArgs::parse_from(args);
         let config = DeployerConfig::from_env_and_args(cli).expect("config builds");
         assert_eq!(config.environment, "prod");
+    }
+
+    #[test]
+    fn rejects_pack_id_without_version_or_digest() {
+        let mut args = base_args();
+        args.push("--pack-id");
+        args.push("dev.greentic.sample");
+        let cli = CliArgs::parse_from(args);
+        let err = DeployerConfig::from_env_and_args(cli).unwrap_err();
+        assert!(
+            format!("{err}").contains("--pack-version"),
+            "expected version requirement error, got {err}"
+        );
+    }
+
+    #[test]
+    fn builds_pack_ref_when_provided() {
+        let mut args = base_args();
+        args.push("--pack-id");
+        args.push("dev.greentic.sample");
+        args.push("--pack-version");
+        args.push("0.1.0");
+        args.push("--pack-digest");
+        args.push("sha256:deadbeef");
+        let cli = CliArgs::parse_from(args);
+        let config = DeployerConfig::from_env_and_args(cli).expect("config builds");
+        let pack_ref = config.pack_ref.expect("pack_ref present");
+        assert_eq!(pack_ref.oci_url, "dev.greentic.sample");
+        assert_eq!(pack_ref.version.to_string(), "0.1.0");
+        assert_eq!(pack_ref.digest, "sha256:deadbeef");
     }
 }

@@ -11,6 +11,32 @@ use crate::plan::{PlanContext, SecretContext};
 use crate::providers::{ApplyManifest, ProviderArtifacts, ProviderBackend, ResolvedSecret};
 use greentic_types::deployment::RunnerPlan;
 
+fn runner_cpu_millis(runner: &RunnerPlan) -> u32 {
+    runner
+        .capabilities
+        .get("cpu_millis")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(500)
+}
+
+fn runner_memory_mb(runner: &RunnerPlan) -> u32 {
+    runner
+        .capabilities
+        .get("memory_mb")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(1024)
+}
+
+fn cpu_to_k8s(millis: u32) -> String {
+    format!("{}m", millis)
+}
+
+fn memory_to_k8s(mb: u32) -> String {
+    format!("{}Mi", mb)
+}
+
 /// GCP-specific backend.
 #[derive(Clone)]
 pub struct GcpBackend {
@@ -21,6 +47,13 @@ pub struct GcpBackend {
 impl GcpBackend {
     pub fn new(config: DeployerConfig, plan: PlanContext) -> Self {
         Self { config, plan }
+    }
+
+    fn is_external_component(&self, runner: &RunnerPlan) -> bool {
+        self.plan
+            .external_components
+            .iter()
+            .any(|id| id == &runner.name)
     }
 
     fn render_main_yaml(&self) -> String {
@@ -36,6 +69,9 @@ impl GcpBackend {
         } else {
             for runner in &self.plan.plan.runners {
                 let resource_name = format!("{}-runner", Self::sanitize_name(&runner.name));
+                if self.is_external_component(runner) {
+                    writeln!(&mut docs, "  # external-facing component").ok();
+                }
                 writeln!(&mut docs, "  - name: {}", resource_name).ok();
                 writeln!(&mut docs, "    type: run.v1.service").ok();
                 writeln!(&mut docs, "    properties:").ok();
@@ -57,6 +93,25 @@ impl GcpBackend {
                 for env in self.gcp_env_entries(runner) {
                     writeln!(&mut docs, "{}", env).ok();
                 }
+                let cpu = cpu_to_k8s(runner_cpu_millis(runner));
+                let memory = memory_to_k8s(runner_memory_mb(runner));
+                writeln!(&mut docs, "            resources:").ok();
+                writeln!(&mut docs, "              limits:").ok();
+                writeln!(&mut docs, "                cpu: {}", cpu).ok();
+                writeln!(&mut docs, "                memory: {}", memory).ok();
+                writeln!(&mut docs, "        scaling:").ok();
+                writeln!(
+                    &mut docs,
+                    "          minInstanceCount: {}",
+                    runner.replicas.max(1)
+                )
+                .ok();
+                writeln!(
+                    &mut docs,
+                    "          maxInstanceCount: {}",
+                    runner.replicas.max(1)
+                )
+                .ok();
             }
         }
 

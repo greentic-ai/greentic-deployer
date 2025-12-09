@@ -1,9 +1,9 @@
 use std::io;
 
-use serde_cbor;
 use serde_json;
 use thiserror::Error;
-use zip;
+
+use greentic_distributor_client::error::DistributorError;
 
 #[derive(Debug, Error)]
 pub enum DeployerError {
@@ -16,11 +16,11 @@ pub enum DeployerError {
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
 
-    #[error("ZIP error: {0}")]
-    Zip(#[from] zip::result::ZipError),
+    #[error("manifest decode error: {0}")]
+    ManifestDecode(#[from] greentic_types::cbor::CborError),
 
-    #[error("CBOR serialization error: {0}")]
-    Cbor(#[from] serde_cbor::Error),
+    #[error("distributor error: {0}")]
+    Distributor(#[from] DistributorError),
 
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),

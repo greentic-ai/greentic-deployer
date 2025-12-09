@@ -1,292 +1,533 @@
-use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::sync::Arc;
 
-use greentic_pack::builder::PackManifest;
-use greentic_pack::plan::infer_base_deployment_plan;
+use greentic_distributor_client::PackId;
+use greentic_distributor_client::source::DistributorSource;
+use greentic_types::cbor::decode_pack_manifest;
 use greentic_types::component::ComponentManifest;
-use greentic_types::deployment::{DeploymentPlan, OAuthPlan, SecretPlan};
-use greentic_types::{EnvId, TenantCtx, TenantId};
-use serde_cbor;
-use serde_json::{self, Map as JsonMap, Value as JsonValue};
-use zip::ZipArchive;
+use greentic_types::deployment::{
+    ChannelPlan, DeploymentPlan, MessagingPlan, RunnerPlan, SecretPlan, TelemetryPlan,
+};
+use greentic_types::flow::FlowKind;
+use greentic_types::pack::PackRef;
+use greentic_types::pack_manifest::{PackFlowEntry, PackKind, PackManifest};
+use semver::Version;
+use serde_json::{Value as JsonValue, json};
+use tar::Archive;
 
 use crate::config::DeployerConfig;
 use crate::error::{DeployerError, Result};
+use crate::path_safety::normalize_under_root;
 use crate::plan::{
     ComponentRole, DeploymentHints, DeploymentProfile, InferenceNotes, InfraPlan, PlanContext,
     PlannedComponent, Target, assemble_plan,
 };
 
+/// Load a pack manifest from raw .gtpack bytes.
+///
+/// CBOR must be decoded exclusively via `greentic_types::decode_pack_manifest`.
+pub fn load_pack_manifest_from_bytes(bytes: &[u8]) -> Result<PackManifest> {
+    decode_pack_manifest(bytes).map_err(DeployerError::ManifestDecode)
+}
+
 /// Build a plan context from the provided pack.
 pub fn build_plan(config: &DeployerConfig) -> Result<PlanContext> {
-    let mut source = PackSource::open(&config.pack_path)?;
+    let cwd = std::env::current_dir()?;
+    let mut source = if let Some(pack_ref) = &config.pack_ref {
+        let source = resolve_distributor_source(config)?;
+        PackSource::from_registry(pack_ref.clone(), source)?
+    } else {
+        let safe_path = if config.pack_path.is_absolute() {
+            let canon = config.pack_path.canonicalize()?;
+            if !canon.starts_with(&cwd) {
+                return Err(DeployerError::Pack(format!(
+                    "absolute pack path escapes root {}: {}",
+                    cwd.display(),
+                    canon.display()
+                )));
+            }
+            canon
+        } else {
+            normalize_under_root(&cwd, &config.pack_path)
+                .map_err(|err| DeployerError::Pack(err.to_string()))?
+        };
+        PackSource::open(&safe_path)?
+    };
+    build_plan_with_source(&mut source, config)
+}
+
+/// Build a plan using an explicitly provided pack source (e.g., registry).
+pub fn build_plan_with_source(
+    source: &mut PackSource,
+    config: &DeployerConfig,
+) -> Result<PlanContext> {
     let manifest = source.read_manifest()?;
-    let components = source.load_component_manifests(&manifest)?;
-    let tenant_ctx = build_tenant_ctx(config)?;
-    let connectors = manifest.meta.annotations.get("connectors");
-    let mut base = infer_base_deployment_plan(
-        &manifest.meta,
-        &manifest.flows,
-        connectors,
-        &components,
-        &tenant_ctx,
-        &config.environment,
-    );
-    merge_annotation_secrets(&mut base, &manifest.meta.annotations);
-    merge_annotation_oauth(&mut base, &manifest.meta.annotations, config);
-    let deployment = build_deployment_hints(&manifest.meta.annotations, config);
-    let components = infer_component_profiles(
-        &manifest,
-        &components,
-        &deployment,
-        &manifest.meta.annotations,
-    );
-    Ok(assemble_plan(base, config, deployment, components))
+    let deployment = build_deployment_hints(config);
+    let base = plan_from_pack_kind(&manifest, config);
+    let external_components: Vec<String> = external_facing_components(&manifest)
+        .into_iter()
+        .map(|c| c.id.to_string())
+        .collect();
+    let components = infer_component_profiles(&manifest, &deployment);
+    Ok(assemble_plan(
+        base,
+        config,
+        deployment,
+        external_components,
+        components,
+    ))
 }
 
-struct PackSource {
-    inner: PackSourceInner,
-}
-
-enum PackSourceInner {
-    Archive(ZipArchive<File>),
-    Directory(PathBuf),
+/// Preferred pack sources.
+#[allow(dead_code)]
+pub enum PackSource {
+    GtpackPath(PathBuf),
+    Dir(PathBuf),
+    Registry {
+        reference: PackRef,
+        source: Arc<dyn DistributorSource>,
+    },
 }
 
 impl PackSource {
     fn open(path: &Path) -> Result<Self> {
         if path.is_dir() {
-            Ok(Self {
-                inner: PackSourceInner::Directory(path.to_path_buf()),
-            })
+            Ok(Self::Dir(path.to_path_buf()))
         } else {
-            let file = File::open(path)?;
-            let archive = ZipArchive::new(file)?;
-            Ok(Self {
-                inner: PackSourceInner::Archive(archive),
-            })
+            Ok(Self::GtpackPath(path.to_path_buf()))
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn from_registry(reference: PackRef, source: Arc<dyn DistributorSource>) -> Result<Self> {
+        Ok(Self::Registry { reference, source })
     }
 
     fn read_manifest(&mut self) -> Result<PackManifest> {
-        match &mut self.inner {
-            PackSourceInner::Archive(archive) => {
-                let mut manifest = Vec::new();
-                let mut entry = archive.by_name("manifest.cbor")?;
-                entry.read_to_end(&mut manifest)?;
-                Ok(serde_cbor::from_slice(&manifest)?)
-            }
-            PackSourceInner::Directory(dir) => read_manifest_from_directory(dir),
+        match self {
+            PackSource::GtpackPath(path) => read_manifest_from_tar(path),
+            PackSource::Dir(path) => read_manifest_from_directory(path),
+            PackSource::Registry {
+                source, reference, ..
+            } => read_manifest_from_registry(source.as_ref(), reference),
+        }
+    }
+}
+
+fn read_manifest_from_tar(path: &Path) -> Result<PackManifest> {
+    let file = File::open(path)?;
+    let mut archive = Archive::new(file);
+    let mut manifest_bytes = None;
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if entry.path()?.as_ref() == Path::new("manifest.cbor") {
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)?;
+            manifest_bytes = Some(buf);
+            break;
         }
     }
 
-    fn load_component_manifests(
-        &mut self,
-        manifest: &PackManifest,
-    ) -> Result<HashMap<String, ComponentManifest>> {
-        let mut components = HashMap::new();
-        for entry in &manifest.components {
-            if let Some(path) = &entry.manifest_file {
-                let json = self.read_file_to_string(path)?;
-                let parsed: ComponentManifest = serde_json::from_str(&json).map_err(|err| {
-                    DeployerError::Pack(format!("component manifest {} is invalid: {}", path, err))
-                })?;
-                components.insert(parsed.id.to_string(), parsed);
+    let bytes = manifest_bytes.ok_or_else(|| {
+        DeployerError::Pack(format!(
+            "manifest.cbor missing in pack archive {}",
+            path.display()
+        ))
+    })?;
+
+    load_pack_manifest_from_bytes(&bytes)
+}
+
+fn resolve_distributor_source(config: &DeployerConfig) -> Result<Arc<dyn DistributorSource>> {
+    DISTRIBUTOR_SOURCE
+        .get()
+        .cloned()
+        .or_else(|| {
+            build_http_distributor_source(
+                config
+                    .distributor_url
+                    .as_deref()
+                    .ok_or_else(|| DeployerError::Config("set --distributor-url when using --pack-id".into()))
+                    .ok()?,
+                config.distributor_token.as_deref(),
+            )
+        })
+        .ok_or_else(|| {
+            DeployerError::Config(
+                "no distributor source registered; either register one programmatically or set --distributor-url"
+                    .to_string(),
+            )
+        })
+}
+
+static DISTRIBUTOR_SOURCE: once_cell::sync::OnceCell<Arc<dyn DistributorSource>> =
+    once_cell::sync::OnceCell::new();
+
+/// Register a distributor source for registry-based pack resolution.
+pub fn set_distributor_source(source: Arc<dyn DistributorSource>) {
+    let _ = DISTRIBUTOR_SOURCE.set(source);
+}
+
+fn build_http_distributor_source(
+    base_url: &str,
+    token: Option<&str>,
+) -> Option<Arc<dyn DistributorSource>> {
+    Some(Arc::new(HttpPackSource::new(
+        base_url.to_string(),
+        token.map(|s| s.to_string()),
+    )))
+}
+
+struct HttpPackSource {
+    client: reqwest::blocking::Client,
+    base_url: String,
+    token: Option<String>,
+    retries: usize,
+}
+
+impl HttpPackSource {
+    fn new(base_url: String, token: Option<String>) -> Self {
+        let client = reqwest::blocking::Client::builder()
+            .build()
+            .expect("build reqwest client");
+        Self {
+            client,
+            base_url,
+            token,
+            retries: 3,
+        }
+    }
+}
+
+impl DistributorSource for HttpPackSource {
+    fn fetch_pack(
+        &self,
+        pack_id: &PackId,
+        version: &Version,
+    ) -> std::result::Result<Vec<u8>, greentic_distributor_client::error::DistributorError> {
+        let url = format!("{}/distributor-api/pack", self.base_url);
+        let payload = serde_json::json!({
+            "pack_id": pack_id.as_str(),
+            "version": version.to_string(),
+        });
+        let mut last_err = None;
+        for _ in 0..self.retries {
+            let mut request = self.client.post(url.clone()).json(&payload);
+            if let Some(token) = &self.token {
+                request = request.bearer_auth(token);
+            }
+            match request.send() {
+                Ok(response) if response.status().is_success() => {
+                    return Ok(response.bytes()?.to_vec());
+                }
+                Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+                    return Err(greentic_distributor_client::error::DistributorError::NotFound);
+                }
+                Ok(response)
+                    if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                        || response.status() == reqwest::StatusCode::FORBIDDEN =>
+                {
+                    return Err(
+                        greentic_distributor_client::error::DistributorError::PermissionDenied,
+                    );
+                }
+                Ok(response) => {
+                    last_err = Some(format!("http status {}", response.status()));
+                }
+                Err(err) => {
+                    last_err = Some(err.to_string());
+                }
             }
         }
-        Ok(components)
+
+        Err(greentic_distributor_client::error::DistributorError::Other(
+            last_err.unwrap_or_else(|| "failed to fetch pack".into()),
+        ))
     }
 
-    fn read_file_to_string(&mut self, relative_path: &str) -> Result<String> {
-        match &mut self.inner {
-            PackSourceInner::Archive(archive) => {
-                let mut entry = archive.by_name(relative_path)?;
-                let mut contents = String::new();
-                entry.read_to_string(&mut contents)?;
-                Ok(contents)
-            }
-            PackSourceInner::Directory(root) => {
-                let path = root.join(relative_path);
-                let contents = fs::read_to_string(path)?;
-                Ok(contents)
-            }
-        }
+    fn fetch_component(
+        &self,
+        _component_id: &greentic_distributor_client::ComponentId,
+        _version: &Version,
+    ) -> std::result::Result<Vec<u8>, greentic_distributor_client::error::DistributorError> {
+        Err(greentic_distributor_client::error::DistributorError::NotFound)
     }
 }
 
 fn read_manifest_from_directory(root: &Path) -> Result<PackManifest> {
-    let cbor = root.join("manifest.cbor");
-    let json = root.join("manifest.json");
-
-    if cbor.exists() {
-        let bytes = fs::read(cbor)?;
-        Ok(serde_cbor::from_slice(&bytes)?)
-    } else if json.exists() {
-        let bytes = fs::read(json)?;
-        Ok(serde_json::from_slice(&bytes)?)
-    } else {
-        Err(DeployerError::Pack(format!(
-            "pack manifest missing in {}",
+    let cbor = normalize_under_root(root, Path::new("manifest.cbor"))
+        .map_err(|err| DeployerError::Pack(err.to_string()))?;
+    if !cbor.exists() {
+        return Err(DeployerError::Pack(format!(
+            "manifest.cbor missing in {}",
             root.display()
-        )))
+        )));
     }
+    let bytes = fs::read(cbor)?;
+    load_pack_manifest_from_bytes(&bytes)
 }
 
-fn build_tenant_ctx(config: &DeployerConfig) -> Result<TenantCtx> {
-    let env_id = EnvId::from_str(&config.environment).map_err(|err| {
-        DeployerError::Config(format!(
-            "invalid environment '{}': {}",
-            config.environment, err
-        ))
+fn read_manifest_from_registry(
+    source: &dyn DistributorSource,
+    reference: &PackRef,
+) -> Result<PackManifest> {
+    let pack_id = reference.oci_url.parse::<PackId>().map_err(|err| {
+        DeployerError::Config(format!("invalid pack id '{}': {err}", reference.oci_url))
     })?;
-    let tenant_id = TenantId::from_str(&config.tenant).map_err(|err| {
-        DeployerError::Config(format!("invalid tenant '{}': {}", config.tenant, err))
-    })?;
-    Ok(TenantCtx::new(env_id, tenant_id))
+    let bytes = source.fetch_pack(&pack_id, &reference.version)?;
+    load_pack_manifest_from_bytes(&bytes)
 }
 
-fn merge_annotation_secrets(plan: &mut DeploymentPlan, annotations: &JsonMap<String, JsonValue>) {
-    let Some(secret_map) = annotations
-        .get("greentic.secrets")
-        .and_then(|value| value.as_object())
-    else {
-        return;
-    };
-
-    for key in secret_map.keys() {
-        if plan.secrets.iter().any(|entry| entry.key == *key) {
-            continue;
-        }
-        plan.secrets.push(SecretPlan {
-            key: key.clone(),
-            required: true,
-            scope: "tenant".to_string(),
-        });
-    }
-}
-
-fn merge_annotation_oauth(
-    plan: &mut DeploymentPlan,
-    annotations: &JsonMap<String, JsonValue>,
-    config: &DeployerConfig,
-) {
-    let Some(oauth_map) = annotations
-        .get("greentic.oauth")
-        .and_then(|value| value.as_object())
-    else {
-        return;
-    };
-
-    if oauth_map.is_empty() {
-        return;
-    }
-
-    plan.oauth = oauth_map
-        .iter()
-        .map(|(provider, entry)| {
-            let logical_client_id = entry
-                .get("client_id")
-                .and_then(|value| value.as_str())
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| format!("{}-{}-{provider}", config.tenant, config.environment));
-
-            let redirect_path = format!(
-                "/oauth/{provider}/callback/{tenant}/{environment}",
-                tenant = config.tenant,
-                environment = config.environment
-            );
-
-            OAuthPlan {
-                provider_id: provider.clone(),
-                logical_client_id,
-                redirect_path,
-                extra: entry.clone(),
-            }
-        })
-        .collect();
-}
-
-fn build_deployment_hints(
-    annotations: &JsonMap<String, JsonValue>,
-    config: &DeployerConfig,
-) -> DeploymentHints {
-    let mut provider = None;
-    let mut strategy = None;
-    if let Some(value) = annotations.get("greentic.deployment") {
-        match value {
-            JsonValue::String(s) => strategy = Some(s.to_string()),
-            JsonValue::Object(map) => {
-                if let Some(val) = map.get("provider").and_then(|v| v.as_str()) {
-                    provider = Some(val.to_string());
-                }
-                if let Some(val) = map.get("strategy").and_then(|v| v.as_str()) {
-                    strategy = Some(val.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let provider_name = provider.unwrap_or_else(|| config.provider.as_str().to_string());
-    let target =
-        target_from_provider(&provider_name).unwrap_or_else(|| Target::from(config.provider));
-
+fn build_deployment_hints(config: &DeployerConfig) -> DeploymentHints {
+    let target: Target = config.provider.into();
     DeploymentHints {
         target,
-        provider: provider_name,
-        strategy: strategy.unwrap_or_else(|| config.strategy.clone()),
+        provider: config.provider.as_str().to_string(),
+        strategy: config.strategy.clone(),
     }
 }
 
-fn target_from_provider(provider: &str) -> Option<Target> {
-    match provider.to_ascii_lowercase().as_str() {
-        "local" | "dev" => Some(Target::Local),
-        "aws" => Some(Target::Aws),
-        "azure" => Some(Target::Azure),
-        "gcp" => Some(Target::Gcp),
-        "k8s" | "kubernetes" => Some(Target::K8s),
-        _ => None,
+fn plan_from_pack_kind(manifest: &PackManifest, config: &DeployerConfig) -> DeploymentPlan {
+    match manifest.kind {
+        PackKind::Application => plan_application(manifest, config),
+        PackKind::Provider => plan_provider(manifest, config),
+        PackKind::Infrastructure => plan_infrastructure(manifest, config),
+        PackKind::Library => plan_library(manifest, config),
     }
 }
 
-#[derive(Debug, Clone)]
-struct ComponentInfo {
-    world: Option<String>,
-    tags: Vec<String>,
+fn plan_application(manifest: &PackManifest, config: &DeployerConfig) -> DeploymentPlan {
+    infer_base_deployment_plan(manifest, config)
+}
+
+fn plan_provider(manifest: &PackManifest, config: &DeployerConfig) -> DeploymentPlan {
+    let mut plan = infer_base_deployment_plan(manifest, config);
+    // Providers shouldn't expose channels directly; keep runners/secrets but drop channels.
+    plan.channels.clear();
+    plan
+}
+
+fn plan_infrastructure(manifest: &PackManifest, config: &DeployerConfig) -> DeploymentPlan {
+    let mut plan = infer_base_deployment_plan(manifest, config);
+    // Infra packs generally lack messaging entrypoints.
+    plan.channels.clear();
+    plan.messaging = None;
+    plan
+}
+
+fn plan_library(manifest: &PackManifest, config: &DeployerConfig) -> DeploymentPlan {
+    // Libraries are not deployed directly; surface metadata without runners/channels.
+    DeploymentPlan {
+        pack_id: manifest.pack_id.to_string(),
+        pack_version: manifest.version.clone(),
+        tenant: config.tenant.clone(),
+        environment: config.environment.clone(),
+        runners: Vec::new(),
+        messaging: None,
+        channels: Vec::new(),
+        secrets: collect_secret_requirements(manifest),
+        oauth: Vec::new(),
+        telemetry: None,
+        extra: JsonValue::Null,
+    }
+}
+
+fn infer_base_deployment_plan(manifest: &PackManifest, config: &DeployerConfig) -> DeploymentPlan {
+    let runners = build_runner_plan(manifest);
+    let channels = build_channel_plan(manifest);
+    let secrets = collect_secret_requirements(manifest);
+    let messaging = messaging_plan_if_needed(manifest, &channels);
+    let telemetry = Some(TelemetryPlan {
+        required: true,
+        suggested_endpoint: None,
+        extra: JsonValue::Null,
+    });
+
+    DeploymentPlan {
+        pack_id: manifest.pack_id.to_string(),
+        pack_version: manifest.version.clone(),
+        tenant: config.tenant.clone(),
+        environment: config.environment.clone(),
+        runners,
+        messaging,
+        channels,
+        secrets,
+        oauth: Vec::new(),
+        telemetry,
+        extra: JsonValue::Null,
+    }
+}
+
+fn messaging_plan_if_needed(
+    manifest: &PackManifest,
+    channels: &[ChannelPlan],
+) -> Option<MessagingPlan> {
+    if messaging_flows(manifest).next().is_none() && channels.is_empty() {
+        return None;
+    }
+
+    Some(MessagingPlan {
+        logical_cluster: "nats-default".to_string(),
+        subjects: Vec::new(),
+        extra: JsonValue::Null,
+    })
+}
+
+fn build_runner_plan(manifest: &PackManifest) -> Vec<RunnerPlan> {
+    components_for_deployment(manifest)
+        .into_iter()
+        .map(|component| {
+            let resources = &component.resources;
+            let replicas = if resources.average_latency_ms.unwrap_or(0) < 50 {
+                2
+            } else {
+                1
+            };
+            RunnerPlan {
+                name: component.id.to_string(),
+                replicas,
+                capabilities: json!({
+                    "cpu_millis": resources.cpu_millis,
+                    "memory_mb": resources.memory_mb,
+                    "average_latency_ms": resources.average_latency_ms,
+                }),
+            }
+        })
+        .collect()
+}
+
+fn build_channel_plan(manifest: &PackManifest) -> Vec<ChannelPlan> {
+    let mut channels = Vec::new();
+
+    for entry in messaging_flows(manifest) {
+        let entrypoints: Vec<String> = if entry.flow.entrypoints.is_empty() {
+            vec!["default".to_string()]
+        } else {
+            entry.flow.entrypoints.keys().cloned().collect()
+        };
+
+        for name in entrypoints {
+            channels.push(ChannelPlan {
+                name: name.clone(),
+                flow_id: entry.id.to_string(),
+                kind: "messaging".to_string(),
+                config: JsonValue::Null,
+            });
+        }
+    }
+
+    for entry in http_flows(manifest) {
+        let entrypoints: Vec<String> = if entry.flow.entrypoints.is_empty() {
+            vec!["default".to_string()]
+        } else {
+            entry.flow.entrypoints.keys().cloned().collect()
+        };
+
+        for name in entrypoints {
+            channels.push(ChannelPlan {
+                name: name.clone(),
+                flow_id: entry.id.to_string(),
+                kind: "http".to_string(),
+                config: JsonValue::Null,
+            });
+        }
+    }
+
+    channels
+}
+
+fn collect_secret_requirements(manifest: &PackManifest) -> Vec<SecretPlan> {
+    let mut secrets = Vec::new();
+    for component in components_for_deployment(manifest) {
+        if let Some(spec) = component.capabilities.host.secrets.as_ref() {
+            for key in &spec.required {
+                if secrets.iter().any(|entry: &SecretPlan| entry.key == *key) {
+                    continue;
+                }
+                secrets.push(SecretPlan {
+                    key: key.clone(),
+                    required: true,
+                    scope: "tenant".to_string(),
+                });
+            }
+        }
+    }
+    secrets
+}
+
+/// Components that should be deployed (currently all declared components).
+pub fn components_for_deployment(manifest: &PackManifest) -> Vec<&ComponentManifest> {
+    manifest.components.iter().collect()
+}
+
+/// Components that are external-facing (messaging/http/event ingress).
+pub fn external_facing_components(manifest: &PackManifest) -> Vec<&ComponentManifest> {
+    manifest
+        .components
+        .iter()
+        .filter(|component| {
+            let host_caps = &component.capabilities.host;
+            host_caps
+                .messaging
+                .as_ref()
+                .map(|m| m.inbound)
+                .unwrap_or(false)
+                || host_caps
+                    .events
+                    .as_ref()
+                    .map(|e| e.inbound)
+                    .unwrap_or(false)
+                || host_caps
+                    .http
+                    .as_ref()
+                    .map(|http| http.server)
+                    .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Iterator over messaging flows embedded in the pack.
+pub fn messaging_flows<'a>(
+    manifest: &'a PackManifest,
+) -> impl Iterator<Item = &'a PackFlowEntry> + 'a {
+    manifest
+        .flows
+        .iter()
+        .filter(|entry| entry.kind == FlowKind::Messaging)
+}
+
+/// Iterator over HTTP flows embedded in the pack.
+pub fn http_flows<'a>(manifest: &'a PackManifest) -> impl Iterator<Item = &'a PackFlowEntry> + 'a {
+    manifest
+        .flows
+        .iter()
+        .filter(|entry| entry.kind == FlowKind::Http)
+}
+
+/// Iterator over component configuration flows.
+pub fn config_flows<'a>(
+    manifest: &'a PackManifest,
+) -> impl Iterator<Item = &'a PackFlowEntry> + 'a {
+    manifest
+        .flows
+        .iter()
+        .filter(|entry| entry.kind == FlowKind::ComponentConfig)
 }
 
 fn infer_component_profiles(
     manifest: &PackManifest,
-    manifests: &HashMap<String, ComponentManifest>,
     deployment: &DeploymentHints,
-    annotations: &JsonMap<String, JsonValue>,
 ) -> Vec<PlannedComponent> {
-    let info_map = collect_component_info(manifest, manifests, annotations);
-    let mut roles = infer_component_roles(manifest);
-    let mut ids: HashSet<String> = info_map.keys().cloned().collect();
-    ids.extend(roles.keys().cloned());
-
-    // Assign a safe default role for components without an explicit mapping.
-    for id in &ids {
-        roles.entry(id.clone()).or_insert(ComponentRole::Worker);
-    }
-
     let mut planned = Vec::new();
-    for id in ids {
-        let info = info_map.get(&id);
-        let explicit_profile = declared_profile(annotations, &id);
-        let tags = info
-            .map(|entry| entry.tags.clone())
-            .unwrap_or_else(|| tags_for_component(annotations, &id));
-        let world = info.and_then(|entry| entry.world.as_deref());
-        let role = roles.get(&id).cloned().unwrap_or(ComponentRole::Worker);
-        let (profile, inference) = infer_profile(&id, explicit_profile, &role, world, &tags);
+    for component in &manifest.components {
+        let role = infer_component_role(component);
+        let (profile, inference) = infer_profile(component, &role);
         let infra = map_profile_to_infra(&deployment.target, &profile);
         planned.push(PlannedComponent {
-            id,
+            id: component.id.to_string(),
             role,
             profile,
             target: deployment.target.clone(),
@@ -299,116 +540,90 @@ fn infer_component_profiles(
     planned
 }
 
-fn collect_component_info(
-    manifest: &PackManifest,
-    manifests: &HashMap<String, ComponentManifest>,
-    annotations: &JsonMap<String, JsonValue>,
-) -> HashMap<String, ComponentInfo> {
-    let mut map = HashMap::new();
-    for entry in &manifest.components {
-        map.entry(entry.name.clone())
-            .or_insert_with(|| ComponentInfo {
-                world: entry.world.clone(),
-                tags: tags_for_component(annotations, &entry.name),
-            });
-    }
-
-    for (id, component) in manifests {
-        map.entry(id.clone())
-            .and_modify(|info| info.world = Some(component.world.clone()))
-            .or_insert_with(|| ComponentInfo {
-                world: Some(component.world.clone()),
-                tags: tags_for_component(annotations, id),
-            });
-    }
-
-    map
-}
-
-fn infer_component_roles(manifest: &PackManifest) -> HashMap<String, ComponentRole> {
-    let mut roles = HashMap::new();
-
-    if let Some(events) = &manifest.meta.events {
-        for provider in &events.providers {
-            let role = match provider.kind {
-                greentic_pack::events::EventProviderKind::Bridge => ComponentRole::EventBridge,
-                _ => ComponentRole::EventProvider,
-            };
-            roles.insert(provider.component.clone(), role);
-        }
-    }
-
-    if let Some(messaging) = manifest
-        .meta
+fn infer_component_role(component: &ComponentManifest) -> ComponentRole {
+    let host_caps = &component.capabilities.host;
+    if host_caps
         .messaging
         .as_ref()
-        .and_then(|entry| entry.adapters.as_ref())
+        .map(|caps| caps.inbound)
+        .unwrap_or(false)
     {
-        for adapter in messaging {
-            roles.insert(adapter.component.clone(), ComponentRole::MessagingAdapter);
-        }
+        return ComponentRole::MessagingAdapter;
     }
-
-    roles
-}
-
-fn declared_profile(
-    annotations: &JsonMap<String, JsonValue>,
-    component_id: &str,
-) -> Option<DeploymentProfile> {
-    let deployment = annotations
-        .get("greentic.deployment")
-        .and_then(|value| value.as_object());
-
-    let profile_value = deployment
-        .and_then(|map| map.get("profiles"))
-        .and_then(|value| value.as_object())
-        .and_then(|profiles| profiles.get(component_id))
-        .or_else(|| {
-            annotations
-                .get("greentic.deployment.profile")
-                .or_else(|| deployment.and_then(|map| map.get("profile")))
-        });
-
-    profile_value
-        .and_then(|value| value.as_str())
-        .and_then(parse_profile)
+    if host_caps
+        .events
+        .as_ref()
+        .map(|caps| caps.inbound)
+        .unwrap_or(false)
+    {
+        return ComponentRole::EventProvider;
+    }
+    if host_caps
+        .events
+        .as_ref()
+        .map(|caps| caps.outbound)
+        .unwrap_or(false)
+    {
+        return ComponentRole::EventBridge;
+    }
+    ComponentRole::Worker
 }
 
 fn infer_profile(
-    component_id: &str,
-    explicit: Option<DeploymentProfile>,
+    component: &ComponentManifest,
     role: &ComponentRole,
-    world: Option<&str>,
-    tags: &[String],
 ) -> (DeploymentProfile, Option<InferenceNotes>) {
-    if let Some(profile) = explicit {
-        return (
-            profile,
-            Some(InferenceNotes {
-                source: "explicit profile from pack metadata".to_string(),
-                warnings: Vec::new(),
-            }),
-        );
-    }
-
-    if let Some((profile, source)) = profile_from_tags(tags) {
-        return (
-            profile,
-            Some(InferenceNotes {
-                source,
-                warnings: Vec::new(),
-            }),
-        );
-    }
-
-    if let Some(world) = world
-        && let Some((profile, source)) = profile_from_world(world)
+    if let Some(default) = component.profiles.default.as_deref()
+        && let Some(profile) = parse_profile(default)
     {
         return (
             profile,
             Some(InferenceNotes {
-                source,
+                source: "default profile from component manifest".to_string(),
+                warnings: Vec::new(),
+            }),
+        );
+    }
+
+    let host_caps = &component.capabilities.host;
+    if host_caps
+        .http
+        .as_ref()
+        .map(|caps| caps.server)
+        .unwrap_or(false)
+    {
+        return (
+            DeploymentProfile::HttpEndpoint,
+            Some(InferenceNotes {
+                source: "inferred from http.server capability".to_string(),
+                warnings: Vec::new(),
+            }),
+        );
+    }
+    if host_caps
+        .messaging
+        .as_ref()
+        .map(|caps| caps.inbound || caps.outbound)
+        .unwrap_or(false)
+    {
+        return (
+            DeploymentProfile::LongLivedService,
+            Some(InferenceNotes {
+                source: "inferred from messaging capability".to_string(),
+                warnings: Vec::new(),
+            }),
+        );
+    }
+    if host_caps
+        .events
+        .as_ref()
+        .map(|caps| caps.inbound || caps.outbound)
+        .unwrap_or(false)
+    {
+        return (
+            DeploymentProfile::ScheduledSource,
+            Some(InferenceNotes {
+                source: "inferred from events capability".to_string(),
                 warnings: Vec::new(),
             }),
         );
@@ -417,7 +632,8 @@ fn infer_profile(
     let (profile, warning) = default_profile(role);
     let warnings = if warning {
         vec![format!(
-            "component {component_id} (role={}) has no deployment profile hints; defaulting to {:?}",
+            "component {} (role={}) defaulted to {:?}",
+            component.id,
             role_label(role),
             profile
         )]
@@ -428,11 +644,7 @@ fn infer_profile(
     (
         profile,
         Some(InferenceNotes {
-            source: if warning {
-                "defaulted profile due to missing hints".to_string()
-            } else {
-                "role-based default profile".to_string()
-            },
+            source: "fallback profile inference".to_string(),
             warnings,
         }),
     )
@@ -440,81 +652,12 @@ fn infer_profile(
 
 fn role_label(role: &ComponentRole) -> &'static str {
     match role {
-        ComponentRole::EventProvider => "event-provider",
-        ComponentRole::EventBridge => "event-bridge",
-        ComponentRole::MessagingAdapter => "messaging-adapter",
+        ComponentRole::EventProvider => "event_provider",
+        ComponentRole::EventBridge => "event_bridge",
+        ComponentRole::MessagingAdapter => "messaging_adapter",
         ComponentRole::Worker => "worker",
         ComponentRole::Other => "component",
     }
-}
-
-fn profile_from_tags(tags: &[String]) -> Option<(DeploymentProfile, String)> {
-    for tag in tags {
-        let normalized = tag.to_ascii_lowercase().replace('-', "_");
-        match normalized.as_str() {
-            "http_endpoint" | "http-endpoint" => {
-                return Some((
-                    DeploymentProfile::HttpEndpoint,
-                    "inferred from tag http-endpoint".to_string(),
-                ));
-            }
-            "scheduled" | "cron" | "scheduled_source" => {
-                return Some((
-                    DeploymentProfile::ScheduledSource,
-                    "inferred from tag scheduled".to_string(),
-                ));
-            }
-            "queue_consumer" | "queue-consumer" => {
-                return Some((
-                    DeploymentProfile::QueueConsumer,
-                    "inferred from tag queue-consumer".to_string(),
-                ));
-            }
-            "long_lived" | "long-lived" | "long_lived_service" | "long-lived-service" => {
-                return Some((
-                    DeploymentProfile::LongLivedService,
-                    "inferred from tag long-lived".to_string(),
-                ));
-            }
-            "one_shot" | "one-shot" | "one_shot_job" | "one-shot-job" => {
-                return Some((
-                    DeploymentProfile::OneShotJob,
-                    "inferred from tag one-shot".to_string(),
-                ));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn profile_from_world(world: &str) -> Option<(DeploymentProfile, String)> {
-    let lowered = world.to_ascii_lowercase();
-    if lowered.contains("http") || lowered.contains("webhook") {
-        return Some((
-            DeploymentProfile::HttpEndpoint,
-            format!("inferred from world '{world}'"),
-        ));
-    }
-    if lowered.contains("schedule") || lowered.contains("timer") || lowered.contains("cron") {
-        return Some((
-            DeploymentProfile::ScheduledSource,
-            format!("inferred from world '{world}'"),
-        ));
-    }
-    if lowered.contains("queue") || lowered.contains("consumer") || lowered.contains("sink") {
-        return Some((
-            DeploymentProfile::QueueConsumer,
-            format!("inferred from world '{world}'"),
-        ));
-    }
-    if lowered.contains("worker") || lowered.contains("job") {
-        return Some((
-            DeploymentProfile::OneShotJob,
-            format!("inferred from world '{world}'"),
-        ));
-    }
-    None
 }
 
 fn default_profile(role: &ComponentRole) -> (DeploymentProfile, bool) {
@@ -538,26 +681,6 @@ fn parse_profile(value: &str) -> Option<DeploymentProfile> {
         "oneshotjob" | "one_shot_job" | "one_shot" => Some(DeploymentProfile::OneShotJob),
         _ => None,
     }
-}
-
-fn tags_for_component(annotations: &JsonMap<String, JsonValue>, component_id: &str) -> Vec<String> {
-    let mut tags = Vec::new();
-    if let Some(entry) = annotations
-        .get("greentic.tags")
-        .and_then(|value| value.as_object())
-        .and_then(|map| map.get(component_id))
-    {
-        if let Some(values) = entry.as_array() {
-            for value in values {
-                if let Some(tag) = value.as_str() {
-                    tags.push(tag.to_string());
-                }
-            }
-        } else if let Some(tag) = entry.as_str() {
-            tags.push(tag.to_string());
-        }
-    }
-    tags
 }
 
 fn map_profile_to_infra(target: &Target, profile: &DeploymentProfile) -> InfraPlan {
@@ -670,152 +793,360 @@ mod tests {
     use super::*;
     use crate::config::{Action, DeployerConfig, OutputFormat, Provider};
     use crate::iac::IaCTool;
-    use crate::plan::Target;
-    use crate::plan::{ComponentRole, DeploymentProfile};
-    use serde_json::json;
-    use std::path::PathBuf;
+    use greentic_types::cbor::encode_pack_manifest;
+    use greentic_types::component::{ComponentCapabilities, ComponentProfiles, HostCapabilities};
+    use greentic_types::flow::{
+        ComponentRef, Flow, FlowMetadata, InputMapping, Node, OutputMapping,
+    };
+    use greentic_types::pack_manifest::PackDependency;
+    use greentic_types::{ComponentId, FlowId, NodeId, PackId, SemverReq};
+    use indexmap::IndexMap;
+    use semver::Version;
+    use std::env;
+    use std::io::Write;
+    use std::str::FromStr;
+    use tar::Builder;
+    use tempfile::tempdir_in;
+
+    fn sample_component(id: &str, inbound_messaging: bool) -> ComponentManifest {
+        let host_caps = HostCapabilities {
+            messaging: Some(greentic_types::component::MessagingCapabilities {
+                inbound: inbound_messaging,
+                outbound: true,
+            }),
+            ..Default::default()
+        };
+        ComponentManifest {
+            id: ComponentId::from_str(id).unwrap(),
+            version: Version::new(0, 1, 0),
+            supports: vec![FlowKind::Messaging, FlowKind::Http],
+            world: "greentic:test/world".to_string(),
+            profiles: ComponentProfiles {
+                default: Some("long_lived_service".to_string()),
+                supported: vec!["long_lived_service".to_string()],
+            },
+            capabilities: ComponentCapabilities {
+                host: host_caps,
+                ..Default::default()
+            },
+            configurators: None,
+            operations: Vec::new(),
+            config_schema: None,
+            resources: Default::default(),
+        }
+    }
+
+    fn sample_flow(id: &str, kind: FlowKind, component: &ComponentManifest) -> PackFlowEntry {
+        let mut nodes: IndexMap<NodeId, Node, greentic_types::flow::FlowHasher> =
+            IndexMap::default();
+        nodes.insert(
+            NodeId::from_str("start").unwrap(),
+            Node {
+                id: NodeId::from_str("start").unwrap(),
+                component: ComponentRef {
+                    id: component.id.clone(),
+                    pack_alias: None,
+                    operation: None,
+                },
+                input: InputMapping {
+                    mapping: JsonValue::Null,
+                },
+                output: OutputMapping {
+                    mapping: JsonValue::Null,
+                },
+                routing: greentic_types::flow::Routing::End,
+                telemetry: Default::default(),
+            },
+        );
+
+        let mut entrypoints = std::collections::BTreeMap::new();
+        entrypoints.insert("default".to_string(), JsonValue::Null);
+
+        let flow = Flow {
+            schema_version: "flowir-v1".to_string(),
+            id: FlowId::from_str(id).unwrap(),
+            kind,
+            entrypoints,
+            nodes,
+            metadata: FlowMetadata::default(),
+        };
+
+        PackFlowEntry {
+            id: flow.id.clone(),
+            kind,
+            flow,
+            tags: vec![format!("{kind:?}")],
+            entrypoints: vec!["default".to_string()],
+        }
+    }
+
+    fn sample_manifest() -> PackManifest {
+        let messaging_component = sample_component("dev.greentic.chat", true);
+        let http_component = sample_component("dev.greentic.http", false);
+
+        let flows = vec![
+            sample_flow("chat_flow", FlowKind::Messaging, &messaging_component),
+            sample_flow("http_flow", FlowKind::Http, &http_component),
+            sample_flow(
+                "config_flow",
+                FlowKind::ComponentConfig,
+                &messaging_component,
+            ),
+        ];
+
+        PackManifest {
+            schema_version: "pack-v1".to_string(),
+            pack_id: PackId::from_str("dev.greentic.sample").unwrap(),
+            version: Version::new(0, 1, 0),
+            kind: PackKind::Application,
+            publisher: "greentic".to_string(),
+            components: vec![messaging_component, http_component],
+            flows,
+            dependencies: vec![PackDependency {
+                alias: "common".to_string(),
+                pack_id: PackId::from_str("dev.greentic.common").unwrap(),
+                version_req: SemverReq::parse("*").unwrap(),
+                required_capabilities: vec![],
+            }],
+            capabilities: Vec::new(),
+            signatures: Default::default(),
+        }
+    }
 
     #[test]
-    fn builds_plan_from_example_pack() {
-        let config = DeployerConfig {
+    fn manifest_round_trip_from_tar_and_dir() {
+        let manifest = sample_manifest();
+        let encoded = encode_pack_manifest(&manifest).expect("encode manifest");
+
+        let mut builder = Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(encoded.len() as u64);
+        header.set_cksum();
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, "manifest.cbor", encoded.as_slice())
+            .expect("append manifest");
+        let dummy = b"wasm";
+        let mut comp_header = tar::Header::new_gnu();
+        comp_header.set_size(dummy.len() as u64);
+        comp_header.set_cksum();
+        comp_header.set_mode(0o644);
+        builder
+            .append_data(
+                &mut comp_header,
+                "components/dev.greentic.chat.wasm",
+                dummy.as_slice(),
+            )
+            .expect("append component");
+        let tar_bytes = builder.into_inner().expect("tar bytes");
+
+        let from_bytes = load_pack_manifest_from_bytes(&encode_pack_manifest(&manifest).unwrap())
+            .expect("decode manifest");
+        assert_eq!(from_bytes.pack_id, manifest.pack_id);
+
+        let cwd = env::current_dir().expect("cwd");
+        let dir = tempdir_in(cwd).expect("temp dir");
+        let manifest_path = dir.path().join("manifest.cbor");
+        fs::write(&manifest_path, &encoded).expect("write manifest");
+        fs::create_dir(dir.path().join("components")).expect("mkdir components");
+        fs::write(
+            dir.path().join("components/dev.greentic.chat.wasm"),
+            b"wasm",
+        )
+        .expect("write component");
+
+        let mut tar_file = tempfile::NamedTempFile::new().expect("temp tar");
+        tar_file.write_all(&tar_bytes).expect("write tar");
+
+        let decoded_tar = {
+            let mut source = PackSource::open(tar_file.path()).expect("open tar source");
+            source.read_manifest().expect("read tar manifest")
+        };
+        assert_eq!(decoded_tar.pack_id, manifest.pack_id);
+        let decoded_dir = {
+            let mut source = PackSource::open(dir.path()).expect("open dir source");
+            source.read_manifest().expect("read dir manifest")
+        };
+        assert_eq!(decoded_dir.pack_id, manifest.pack_id);
+    }
+
+    #[test]
+    fn helpers_filter_flows_and_components() {
+        let manifest = sample_manifest();
+        let messaging: Vec<_> = messaging_flows(&manifest).collect();
+        let http: Vec<_> = http_flows(&manifest).collect();
+        let config: Vec<_> = config_flows(&manifest).collect();
+
+        assert_eq!(messaging.len(), 1);
+        assert_eq!(http.len(), 1);
+        assert_eq!(config.len(), 1);
+
+        let components = components_for_deployment(&manifest);
+        assert_eq!(components.len(), 2);
+        let external = external_facing_components(&manifest);
+        assert_eq!(external.len(), 1);
+        assert_eq!(
+            external[0].id,
+            ComponentId::from_str("dev.greentic.chat").unwrap()
+        );
+    }
+
+    #[test]
+    fn runner_plan_respects_resource_hints() {
+        let mut manifest = sample_manifest();
+        // Set resource hints to drive replicas > 1.
+        if let Some(component) = manifest
+            .components
+            .iter_mut()
+            .find(|c| c.id == ComponentId::from_str("dev.greentic.chat").unwrap())
+        {
+            component.resources.cpu_millis = Some(256);
+            component.resources.memory_mb = Some(512);
+            component.resources.average_latency_ms = Some(10);
+        }
+        let runners = build_runner_plan(&manifest);
+        let chat = runners
+            .iter()
+            .find(|r| r.name == "dev.greentic.chat")
+            .expect("runner present");
+        assert!(
+            chat.replicas >= 2,
+            "low-latency components scale up replicas"
+        );
+        assert_eq!(
+            chat.capabilities.get("cpu_millis").and_then(|v| v.as_u64()),
+            Some(256)
+        );
+        assert_eq!(
+            chat.capabilities.get("memory_mb").and_then(|v| v.as_u64()),
+            Some(512)
+        );
+    }
+
+    #[test]
+    fn library_pack_skips_runners_and_channels() {
+        let mut manifest = sample_manifest();
+        manifest.kind = PackKind::Library;
+        let config = default_config(PathBuf::from("."));
+        let plan = plan_from_pack_kind(&manifest, &config);
+        assert!(plan.runners.is_empty());
+        assert!(plan.channels.is_empty());
+        assert_eq!(plan.pack_id, manifest.pack_id.to_string());
+    }
+
+    #[test]
+    fn provider_plan_drops_channels_but_keeps_runners() {
+        let mut manifest = sample_manifest();
+        manifest.kind = PackKind::Provider;
+        let config = default_config(PathBuf::from("."));
+        let plan = plan_from_pack_kind(&manifest, &config);
+        assert!(
+            plan.channels.is_empty(),
+            "provider packs should not expose channels"
+        );
+        assert!(!plan.runners.is_empty(), "provider packs keep runners");
+    }
+
+    #[test]
+    fn infrastructure_plan_has_no_messaging() {
+        let mut manifest = sample_manifest();
+        manifest.kind = PackKind::Infrastructure;
+        let config = default_config(PathBuf::from("."));
+        let plan = plan_from_pack_kind(&manifest, &config);
+        assert!(plan.messaging.is_none(), "infra packs drop messaging plan");
+    }
+
+    struct MemorySource {
+        bytes: Vec<u8>,
+    }
+
+    impl DistributorSource for MemorySource {
+        fn fetch_pack(
+            &self,
+            _pack_id: &PackId,
+            _version: &Version,
+        ) -> std::result::Result<Vec<u8>, greentic_distributor_client::error::DistributorError>
+        {
+            Ok(self.bytes.clone())
+        }
+
+        fn fetch_component(
+            &self,
+            _component_id: &greentic_distributor_client::ComponentId,
+            _version: &Version,
+        ) -> std::result::Result<Vec<u8>, greentic_distributor_client::error::DistributorError>
+        {
+            Err(greentic_distributor_client::error::DistributorError::NotFound)
+        }
+    }
+
+    #[test]
+    fn registry_source_can_load_manifest() {
+        let manifest = sample_manifest();
+        let encoded = encode_pack_manifest(&manifest).expect("encode manifest");
+        let source = MemorySource { bytes: encoded };
+        let pack_id = PackId::try_from("dev.greentic.sample").unwrap();
+        let reference = PackRef::new(
+            pack_id.to_string(),
+            Version::new(0, 1, 0),
+            "sha256:deadbeef",
+        );
+        let decoded = read_manifest_from_registry(&source, &reference).expect("registry decode");
+        assert_eq!(decoded.pack_id, manifest.pack_id);
+    }
+
+    #[test]
+    fn build_plan_uses_registry_when_pack_ref_set() {
+        let manifest = sample_manifest();
+        let encoded = encode_pack_manifest(&manifest).expect("encode manifest");
+        let source = MemorySource { bytes: encoded };
+        set_distributor_source(Arc::new(source));
+
+        let config = registry_config();
+
+        let plan = build_plan(&config).expect("plan builds via registry");
+        assert_eq!(plan.plan.pack_id, manifest.pack_id.to_string());
+    }
+
+    fn registry_config() -> DeployerConfig {
+        DeployerConfig {
             action: Action::Plan,
             provider: Provider::Aws,
             strategy: "iac-only".into(),
             tenant: "acme".into(),
             environment: "staging".into(),
-            pack_path: PathBuf::from("examples/acme-pack"),
+            pack_path: PathBuf::from("unused.gtpack"),
+            pack_ref: Some(PackRef::new(
+                "dev.greentic.sample",
+                Version::new(0, 1, 0),
+                "sha256:deadbeef",
+            )),
+            distributor_url: None,
+            distributor_token: None,
             yes: true,
             preview: false,
             dry_run: false,
             iac_tool: IaCTool::Terraform,
             output: OutputFormat::Text,
-        };
-
-        let plan = build_plan(&config).expect("should build plan");
-        assert_eq!(plan.plan.tenant, "acme");
-        assert_eq!(plan.plan.environment, "staging");
-        assert_eq!(plan.plan.runners.len(), 1);
-        assert_eq!(plan.plan.secrets.len(), 2);
-        assert_eq!(plan.plan.oauth.len(), 2);
-        assert_eq!(plan.deployment.provider, "aws");
-        assert_eq!(plan.deployment.strategy, "iac-only");
-        assert_eq!(plan.target, Target::Aws);
-        assert!(
-            !plan.components.is_empty(),
-            "expected component planning entries"
-        );
+        }
     }
 
-    #[test]
-    fn builds_plan_from_complex_pack() {
-        let config = DeployerConfig {
-            action: Action::Plan,
-            provider: Provider::Azure,
-            strategy: "iac-only".into(),
-            tenant: "acmeplus".into(),
-            environment: "staging".into(),
-            pack_path: PathBuf::from("examples/acme-plus-pack"),
-            yes: true,
-            preview: false,
-            dry_run: false,
-            iac_tool: IaCTool::Terraform,
-            output: OutputFormat::Text,
-        };
-
-        let plan = build_plan(&config).expect("should build complex plan");
-        assert_eq!(plan.plan.tenant, "acmeplus");
-        assert!(plan.plan.messaging.is_some(), "expected messaging subjects");
-        assert!(
-            plan.plan.secrets.len() >= 4,
-            "expected merged secrets from annotations and components"
-        );
-        assert!(
-            plan.plan.channels.len() >= 2,
-            "expected channel entries from connectors"
-        );
-        assert_eq!(plan.plan.oauth.len(), 2);
-        assert_eq!(plan.deployment.provider, "azure");
-        assert_eq!(plan.deployment.strategy, "iac-only");
-        assert_eq!(plan.target, Target::Azure);
-    }
-
-    #[test]
-    fn deployment_hints_respect_annotations() {
-        let mut annotations = JsonMap::new();
-        annotations.insert(
-            "greentic.deployment".into(),
-            json!({ "provider": "k8s", "strategy": "kubectl" }),
-        );
-        let config = DeployerConfig {
+    fn default_config(pack_path: PathBuf) -> DeployerConfig {
+        DeployerConfig {
             action: Action::Plan,
             provider: Provider::Aws,
             strategy: "iac-only".into(),
             tenant: "acme".into(),
-            environment: "dev".into(),
-            pack_path: PathBuf::from("examples/acme-pack"),
+            environment: "staging".into(),
+            pack_path,
+            pack_ref: None,
+            distributor_url: None,
+            distributor_token: None,
             yes: true,
             preview: false,
             dry_run: false,
             iac_tool: IaCTool::Terraform,
             output: OutputFormat::Text,
-        };
-        let hints = super::build_deployment_hints(&annotations, &config);
-        assert_eq!(hints.provider, "k8s");
-        assert_eq!(hints.strategy, "kubectl");
-        assert_eq!(hints.target, Target::K8s);
-    }
-
-    #[test]
-    fn infers_profile_from_tags_without_warning() {
-        let (profile, notes) = infer_profile(
-            "comp-tagged",
-            None,
-            &ComponentRole::EventProvider,
-            Some("greentic:events/source"),
-            &[String::from("http-endpoint")],
-        );
-        assert_eq!(profile, DeploymentProfile::HttpEndpoint);
-        let notes = notes.expect("notes present");
-        assert!(notes.warnings.is_empty());
-        assert!(
-            notes.source.contains("tag"),
-            "expected tag-based inference source"
-        );
-    }
-
-    #[test]
-    fn defaults_profile_with_warning_when_missing_hints() {
-        let (profile, notes) = infer_profile(
-            "comp-unhinted",
-            None,
-            &ComponentRole::EventBridge,
-            None,
-            &[],
-        );
-        assert_eq!(profile, DeploymentProfile::LongLivedService);
-        let notes = notes.expect("notes present");
-        assert!(
-            notes.warnings.iter().any(|w| w.contains("comp-unhinted")),
-            "should emit warning mentioning component id"
-        );
-    }
-
-    #[test]
-    fn maps_profiles_to_all_targets() {
-        let profile = DeploymentProfile::ScheduledSource;
-        for target in [
-            Target::Local,
-            Target::Aws,
-            Target::Azure,
-            Target::Gcp,
-            Target::K8s,
-        ] {
-            let infra = map_profile_to_infra(&target, &profile);
-            assert_eq!(infra.target, target);
-            assert!(
-                !infra.summary.is_empty(),
-                "infra summary should be present for {target:?}"
-            );
         }
     }
 }

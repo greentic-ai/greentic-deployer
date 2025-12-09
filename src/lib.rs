@@ -9,6 +9,7 @@ pub mod deployment;
 pub mod error;
 pub mod iac;
 pub mod pack_introspect;
+pub mod path_safety;
 pub mod plan;
 pub mod providers;
 pub mod secrets;

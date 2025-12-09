@@ -37,11 +37,23 @@ greentic-deployer apply --provider aws --tenant acme --environment staging --pac
 ```
 - Destroy resources when you no longer need them:
   ```bash
-greentic-deployer destroy --provider aws --tenant acme --environment staging --pack examples/acme-pack
-```
+  greentic-deployer destroy --provider aws --tenant acme --environment staging --pack examples/acme-pack
+  ```
 - Plan locally (requires a deployment pack + executor for local targets):
   ```bash
   greentic-deployer plan --provider local --tenant acme --environment dev --pack examples/acme-pack --output json
+  ```
+- Resolve packs from a distributor/registry instead of the filesystem:
+  ```bash
+  greentic-deployer plan \
+    --provider aws \
+    --tenant acme \
+    --environment staging \
+    --pack-id dev.greentic.sample \
+    --pack-version 0.1.0 \
+    --pack-digest sha256:deadbeef \
+    --distributor-url https://distributor.example.com \
+    --distributor-token $DISTRIBUTOR_TOKEN
   ```
 
 Plans and provider artifacts are written to `deploy/<provider>/<tenant>/<environment>/` for inspection.
