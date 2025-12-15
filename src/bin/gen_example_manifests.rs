@@ -25,6 +25,7 @@ fn write_manifest(dir: &str, pack_id: &str) {
             operations: Vec::new(),
             config_schema: None,
             resources: Default::default(),
+            dev_flows: Default::default(),
         }],
         flows: Vec::new(),
         dependencies: Vec::new(),

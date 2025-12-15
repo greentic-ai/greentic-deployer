@@ -32,6 +32,19 @@ pub enum DeployerError {
     Secret(String),
 
     #[error(
+        "missing secrets for pack {pack_id} {pack_version}: {missing:?}. Remediate via: {hint}"
+    )]
+    MissingSecrets {
+        pack_id: String,
+        pack_version: String,
+        missing: Vec<String>,
+        hint: String,
+    },
+
+    #[error("offline mode incompatible with requested operation: {0}")]
+    OfflineDisallowed(String),
+
+    #[error(
         "IaC tool '{tool}' missing on PATH (binary '{binary}'). Install it or choose --iac-tool / GREENTIC_IAC_TOOL."
     )]
     IaCToolMissing { tool: String, binary: &'static str },

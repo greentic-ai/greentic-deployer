@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{DeployerConfig, Provider};
 use crate::error::Result;
-use crate::plan::{PlanContext, SecretContext};
+use crate::plan::{PlanContext, requirement_scope};
+use greentic_types::secrets::{SecretRequirement, SecretScope};
 
 pub mod aws;
 pub mod azure;
@@ -26,7 +27,7 @@ pub struct GeneratedFile {
 /// Resolved secret metadata emitted during apply/destroy.
 #[derive(Debug, Clone)]
 pub struct ResolvedSecret {
-    pub spec: SecretContext,
+    pub requirement: SecretRequirement,
     pub value: String,
     pub provider_path: String,
 }
@@ -89,7 +90,7 @@ pub struct ApplySecret {
     pub logical_name: String,
     pub provider_path: String,
     pub value_length: usize,
-    pub scope: String,
+    pub scope: SecretScope,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,11 +116,18 @@ impl ApplyManifest {
         let plan = &artifacts.plan;
         let secret_entries = secrets
             .iter()
-            .map(|entry| ApplySecret {
-                logical_name: entry.spec.key.clone(),
-                provider_path: entry.provider_path.clone(),
-                value_length: entry.value_len(),
-                scope: entry.spec.scope.clone(),
+            .map(|entry| {
+                let scope = requirement_scope(
+                    &entry.requirement,
+                    &plan.plan.environment,
+                    &plan.plan.tenant,
+                );
+                ApplySecret {
+                    logical_name: entry.requirement.key.as_str().to_string(),
+                    provider_path: entry.provider_path.clone(),
+                    value_length: entry.value_len(),
+                    scope,
+                }
             })
             .collect();
 

@@ -2,6 +2,9 @@ use std::env;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use greentic_config::{ConfigResolver, ProvenanceMap};
+use greentic_config_types::{GreenticConfig, PathsConfig, TelemetryConfig};
+use greentic_types::ConnectionKind;
 use greentic_types::pack::PackRef;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -73,7 +76,7 @@ pub struct ActionArgs {
     #[arg(long)]
     pub tenant: String,
 
-    /// Environment name (defaults to $GREENTIC_ENV or \"dev\").
+    /// Environment name (defaults to greentic-config environment).
     #[arg(long)]
     pub environment: Option<String>,
 
@@ -131,8 +134,25 @@ pub struct ActionArgs {
     long_about = "Choose Terraform or OpenTofu via --iac-tool or GREENTIC_IAC_TOOL, or rely on PATH auto-detection (tofu takes precedence). Apply/destroy commands run terraform/tofu init/plan/apply or init/destroy inside deploy/<provider>/<tenant>/<env>."
 )]
 pub struct CliArgs {
+    #[command(flatten)]
+    pub global: GlobalArgs,
     #[command(subcommand)]
     pub command: Command,
+}
+
+#[derive(Debug, Args, Default)]
+pub struct GlobalArgs {
+    /// Optional explicit config path (overrides project/user discovery).
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+
+    /// Print resolved configuration (with provenance) and exit.
+    #[arg(long, default_value_t = false)]
+    pub explain_config: bool,
+
+    /// Allow using remote endpoints even when ConnectionKind is Offline.
+    #[arg(long, default_value_t = false)]
+    pub allow_remote_in_offline: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -162,6 +182,11 @@ pub struct DeployerConfig {
     pub dry_run: bool,
     pub iac_tool: IaCTool,
     pub output: OutputFormat,
+    pub greentic: GreenticConfig,
+    pub provenance: ProvenanceMap,
+    pub config_warnings: Vec<String>,
+    pub explain_config: bool,
+    pub allow_remote_in_offline: bool,
 }
 
 impl DeployerConfig {
@@ -172,11 +197,21 @@ impl DeployerConfig {
             Command::Destroy(args) => (Action::Destroy, args),
         };
 
-        let environment = args
-            .environment
-            .clone()
-            .or_else(|| env::var("GREENTIC_ENV").ok())
-            .unwrap_or_else(|| "dev".to_string());
+        let mut resolver = ConfigResolver::new();
+        if let Some(path) = cli.global.config.as_ref() {
+            let root = if path.is_file() {
+                path.parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."))
+            } else {
+                path.clone()
+            };
+            resolver = resolver.with_project_root(root);
+        }
+        let resolved = resolver
+            .load()
+            .map_err(|err| DeployerError::Config(err.to_string()))?;
+        let greentic = resolved.config;
 
         if !args.pack.exists() && args.pack_id.is_none() {
             return Err(DeployerError::Config(format!(
@@ -185,8 +220,28 @@ impl DeployerConfig {
             )));
         }
 
+        let environment = env_id_to_string(
+            args.environment
+                .clone()
+                .or_else(|| Some(greentic.environment.env_id.to_string())),
+        )?;
+
         let iac_tool = resolve_iac_tool(args.iac_tool, env::var("GREENTIC_IAC_TOOL").ok())?;
         let pack_ref = build_pack_ref(&args)?;
+
+        let distributor_url = args
+            .distributor_url
+            .or_else(|| env::var("GREENTIC_DISTRIBUTOR_URL").ok());
+        let distributor_token = args
+            .distributor_token
+            .or_else(|| env::var("GREENTIC_DISTRIBUTOR_TOKEN").ok());
+
+        validate_offline_policy(
+            greentic.environment.connection.as_ref(),
+            &pack_ref,
+            distributor_url.as_deref(),
+            cli.global.allow_remote_in_offline,
+        )?;
 
         Ok(Self {
             action,
@@ -196,18 +251,38 @@ impl DeployerConfig {
             environment,
             pack_path: args.pack,
             pack_ref,
-            distributor_url: args
-                .distributor_url
-                .or_else(|| env::var("GREENTIC_DISTRIBUTOR_URL").ok()),
-            distributor_token: args
-                .distributor_token
-                .or_else(|| env::var("GREENTIC_DISTRIBUTOR_TOKEN").ok()),
+            distributor_url,
+            distributor_token,
             yes: args.yes,
             preview: args.preview,
             dry_run: args.dry_run,
             iac_tool,
             output: args.output,
+            greentic,
+            provenance: resolved.provenance,
+            config_warnings: resolved.warnings,
+            explain_config: cli.global.explain_config,
+            allow_remote_in_offline: cli.global.allow_remote_in_offline,
         })
+    }
+
+    pub fn deploy_base(&self) -> PathBuf {
+        self.greentic.paths.state_dir.join("deploy")
+    }
+
+    pub fn provider_output_dir(&self) -> PathBuf {
+        self.deploy_base()
+            .join(self.provider.as_str())
+            .join(&self.tenant)
+            .join(&self.environment)
+    }
+
+    pub fn telemetry_config(&self) -> &TelemetryConfig {
+        &self.greentic.telemetry
+    }
+
+    pub fn paths(&self) -> &PathsConfig {
+        &self.greentic.paths
     }
 }
 
@@ -225,6 +300,27 @@ fn build_pack_ref(args: &ActionArgs) -> Result<Option<PackRef>> {
         DeployerError::Config(format!("invalid pack version '{}': {}", version_str, err))
     })?;
     Ok(Some(PackRef::new(pack_id.clone(), version, digest.clone())))
+}
+
+fn env_id_to_string(env_id: Option<String>) -> Result<String> {
+    Ok(env_id.unwrap_or_else(|| "dev".to_string()))
+}
+
+fn validate_offline_policy(
+    connection: Option<&ConnectionKind>,
+    pack_ref: &Option<PackRef>,
+    distributor_url: Option<&str>,
+    allow_remote_in_offline: bool,
+) -> Result<()> {
+    if matches!(connection, Some(ConnectionKind::Offline))
+        && !allow_remote_in_offline
+        && (pack_ref.is_some() || distributor_url.is_some())
+    {
+        return Err(DeployerError::OfflineDisallowed(
+            "connection is Offline but remote pack/distributor requested; pass --allow-remote-in-offline to override".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tracing::{info, info_span};
 
@@ -12,11 +12,12 @@ use crate::iac::{
     run_iac_plan_apply,
 };
 use crate::pack_introspect;
-use crate::plan::{PlanContext, SecretContext};
+use crate::plan::{PlanContext, requirement_scope};
 use crate::providers::{ProviderArtifacts, ResolvedSecret, create_backend};
-use crate::secrets::SecretsContext;
+use crate::secrets::{SecretFetchOutcome, SecretsContext};
 use crate::telemetry;
 use greentic_telemetry::{TelemetryCtx, set_current_telemetry_ctx};
+use greentic_types::secrets::SecretRequirement;
 use serde_json;
 use serde_yaml_bw as serde_yaml;
 
@@ -74,20 +75,12 @@ pub async fn run_with_plan(
     let artifacts = backend.plan().await?;
     write_artifacts(&config, &artifacts)?;
 
-    let deploy_dir = PathBuf::from("deploy")
-        .join(artifacts.provider.as_str())
-        .join(&config.tenant)
-        .join(&config.environment);
+    let deploy_dir = config.provider_output_dir();
 
     let render_text = config.action != Action::Plan || matches!(config.output, OutputFormat::Text);
     if render_text {
         println!("{}", plan.summary());
-        println!(
-            "Artifacts stored under deploy/{}/{}/{}",
-            artifacts.provider.as_str(),
-            config.tenant,
-            config.environment
-        );
+        println!("Artifacts stored under {}", deploy_dir.display());
     }
 
     let secrets_client = SecretsContext::discover(&config).await?;
@@ -113,10 +106,9 @@ pub async fn run_with_plan(
                 let span = stage_span("apply", &config);
                 let _enter = span.enter();
                 install_telemetry_context("apply", &config);
-                let resolved = resolve_secrets(&secrets_client, &plan.secrets).await?;
-                secrets_client
-                    .push_to_provider(config.provider, &resolved)
-                    .await?;
+                let resolved =
+                    resolve_secrets(&secrets_client, &plan.secrets, &plan, &config).await?;
+                secrets_client.push_to_provider(&resolved).await?;
                 backend.apply(&artifacts, &resolved).await?;
                 run_iac_plan_apply(runner, config.iac_tool, &deploy_dir)?;
             }
@@ -135,10 +127,9 @@ pub async fn run_with_plan(
                 let span = stage_span("destroy", &config);
                 let _enter = span.enter();
                 install_telemetry_context("destroy", &config);
-                let resolved = resolve_secrets(&secrets_client, &plan.secrets).await?;
-                secrets_client
-                    .push_to_provider(config.provider, &resolved)
-                    .await?;
+                let resolved =
+                    resolve_secrets(&secrets_client, &plan.secrets, &plan, &config).await?;
+                secrets_client.push_to_provider(&resolved).await?;
                 backend.destroy(&artifacts, &resolved).await?;
                 run_iac_destroy(runner, config.iac_tool, &deploy_dir)?;
             }
@@ -162,10 +153,7 @@ fn confirm_or_cancel(action: &str) -> Result<bool> {
 }
 
 fn write_artifacts(config: &DeployerConfig, artifacts: &ProviderArtifacts) -> Result<()> {
-    let base = PathBuf::from("deploy")
-        .join(artifacts.provider.as_str())
-        .join(&config.tenant)
-        .join(&config.environment);
+    let base = config.provider_output_dir();
     fs::create_dir_all(&base)?;
 
     for file in &artifacts.files {
@@ -181,24 +169,85 @@ fn write_artifacts(config: &DeployerConfig, artifacts: &ProviderArtifacts) -> Re
 
 async fn resolve_secrets(
     client: &SecretsContext,
-    specs: &[SecretContext],
+    specs: &[SecretRequirement],
+    plan: &PlanContext,
+    config: &DeployerConfig,
 ) -> Result<Vec<ResolvedSecret>> {
     let mut resolved = Vec::new();
-    for spec in specs {
-        let provider_path = client.logical_to_provider_path(&spec.key);
-        let value = client.resolve(&spec.key).await?;
-        info!(
-            "resolved secret {} -> {} ({} bytes)",
-            spec.key,
-            provider_path,
-            value.len()
+    let mut missing = Vec::new();
+
+    for requirement in specs {
+        match client.fetch(requirement).await {
+            SecretFetchOutcome::Present {
+                requirement,
+                provider_path,
+                value,
+            } => {
+                let scope =
+                    requirement_scope(&requirement, &plan.plan.environment, &plan.plan.tenant);
+                info!(
+                    "resolved secret {} (env={}, tenant={}, team={:?}) -> {} bytes",
+                    requirement.key.as_str(),
+                    scope.env,
+                    scope.tenant,
+                    scope.team,
+                    value.len()
+                );
+                resolved.push(ResolvedSecret {
+                    requirement,
+                    value,
+                    provider_path,
+                });
+            }
+            SecretFetchOutcome::Missing {
+                requirement,
+                provider_path,
+                error,
+            } => {
+                if requirement.required {
+                    missing.push((requirement, provider_path, error));
+                } else {
+                    let scope =
+                        requirement_scope(&requirement, &plan.plan.environment, &plan.plan.tenant);
+                    info!(
+                        "optional secret {} missing in env={} tenant={}; continuing",
+                        requirement.key.as_str(),
+                        scope.env,
+                        scope.tenant
+                    );
+                }
+            }
+        }
+    }
+
+    if !missing.is_empty() {
+        let missing_keys: Vec<String> = missing
+            .iter()
+            .map(|(req, path, err)| {
+                let scope = requirement_scope(req, &plan.plan.environment, &plan.plan.tenant);
+                format!(
+                    "{} (env={}, tenant={}, team={:?}, path={}, error={})",
+                    req.key.as_str(),
+                    scope.env,
+                    scope.tenant,
+                    scope.team,
+                    path,
+                    err
+                )
+            })
+            .collect();
+        let hint = format!(
+            "greentic-secrets init --pack {}",
+            config.pack_path.display()
         );
-        resolved.push(ResolvedSecret {
-            spec: spec.clone(),
-            value,
-            provider_path,
+        return Err(DeployerError::MissingSecrets {
+            pack_id: plan.plan.pack_id.clone(),
+            pack_version: plan.plan.pack_version.to_string(),
+            missing: missing_keys,
+            hint,
         });
     }
+
     Ok(resolved)
 }
 

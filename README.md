@@ -62,15 +62,16 @@ For Local/K8s targets, wire in a deployment pack + executor (or extend the provi
 
 ## Configuration
 
-- `GREENTIC_ENV` sets the default environment (defaults to `dev`).
+- Configuration is resolved via `greentic-config` with precedence `CLI > env > --config file > project (.greentic/config.toml) > user (~/.config/greentic/config.toml) > defaults`. Use `--config <path>` for an explicit file and `--explain-config` to print the resolved config/provenance.
 - `GREENTIC_BASE_DOMAIN` controls the base domain used when emitting OAuth redirect URLs (defaults to `deploy.greentic.ai`).
-- OTLP tracing is wired via `GREENTIC_OTLP_ENDPOINT` or standard `OTEL_EXPORTER_OTLP_ENDPOINT`.
+- OTLP tracing reads the endpoint from config; `OTEL_EXPORTER_OTLP_ENDPOINT` remains a fallback.
 - `GREENTIC_IAC_TOOL` overrides the IaC tool used when running `apply`/`destroy`. Accepts `tf`/`terraform` or `tofu`/`opentofu`. When unset the deployer prefers `tofu` (if available), falls back to `terraform`, and execution fails later if the binary is absent.
+- When `connection` is set to `Offline` in config, remote pack/distributor access is blocked unless `--allow-remote-in-offline` is provided.
 
 ## Secrets & OAuth
 
-- Secrets are surfaced in plans with logical names (e.g. `SLACK_BOT_TOKEN`, `TEAMS_CLIENT_SECRET`) and are only fetched during `apply`/`destroy`.
-- `greentic-deployer` now uses `greentic-secrets`’ `DefaultResolver` so AWS/Azure/GCP backends are auto-discovered via environment metadata and a `SecretsCore` is built for the configured tenant/environment. Apply/destroy fail fast when a required secret is missing, with a clear tenant/environment error.
+- Secret requirements are pulled from pack metadata (`secret_requirements`) and surfaced in plans. Apply/destroy preflight each required secret via the secrets-store and fail fast with the missing key list plus a remediation hint (`greentic-secrets init --pack <pack>`). No secret values are logged.
+- `greentic-deployer` resolves secrets using the runtime tenant/environment scope; apply/destroy fail if the secrets-store does not contain the required entries.
 - OAuth clients use `greentic-oauth`’s `ProviderId` identifiers (e.g. `google`, `microsoft`, `github`) so downstream tooling can reuse the same descriptors when wiring the broker, and redirect URLs continue to follow the `https://{domain}/oauth/{provider}/callback/{tenant}/{environment}` pattern.
 
 -## Telemetry & Provider Artifacts
@@ -138,6 +139,10 @@ Once artifacts exist and secrets are stored you can re-run them manually:
 
 - `scripts/ci-smoke.sh` iterates over providers (`aws/azure/gcp`), actions (`apply/destroy`), and both packs in `--dry-run` mode to guarantee IaC command generation works. Local/K8s are not covered by the legacy shims and require a deployment pack executor.
 - `./ci/local_check.sh` is the local equivalent run before pushing (fmt, clippy, tests, docs, and the smoke script).
+
+## Repo settings
+
+- Enable GitHub’s “Allow auto-merge” so Dependabot PRs can merge after required checks pass; set required status checks via branch protection as needed.
 
 ## Sample IaC output / deployment packs
 

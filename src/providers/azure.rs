@@ -8,9 +8,10 @@ use tracing::info;
 
 use crate::config::{DeployerConfig, Provider};
 use crate::error::Result;
-use crate::plan::{PlanContext, SecretContext};
+use crate::plan::{PlanContext, requirement_scope};
 use crate::providers::{ApplyManifest, ProviderArtifacts, ProviderBackend, ResolvedSecret};
 use greentic_types::deployment::RunnerPlan;
+use greentic_types::secrets::SecretRequirement;
 
 fn runner_cpu_cores(runner: &RunnerPlan) -> String {
     let millis = runner
@@ -106,9 +107,10 @@ impl AzureBackend {
                     let mut secrets = String::new();
                     secrets.push_str("      secrets:\n      [\n");
                     for spec in &self.plan.secrets {
+                        let key = spec.key.as_str();
                         secrets.push_str(&format!(
                             "        {{ name: '{}', value: secretPaths['{}'] }}\n",
-                            spec.key, spec.key
+                            key, key
                         ));
                     }
                     secrets.push_str("      ]\n");
@@ -209,15 +211,22 @@ impl AzureBackend {
     fn secret_paths_map(&self) -> serde_json::Map<String, serde_json::Value> {
         let mut secrets = serde_json::Map::new();
         for spec in &self.plan.secrets {
-            secrets.insert(spec.key.clone(), json!(self.secret_reference_path(spec)));
+            secrets.insert(
+                spec.key.as_str().to_string(),
+                json!(self.secret_reference_path(spec)),
+            );
         }
         secrets
     }
 
-    fn secret_reference_path(&self, spec: &SecretContext) -> String {
+    fn secret_reference_path(&self, spec: &SecretRequirement) -> String {
+        let scope = requirement_scope(spec, &self.plan.plan.environment, &self.plan.plan.tenant);
         format!(
-            "@sec:greentic/{}/{}/{}",
-            self.config.tenant, self.config.environment, spec.key
+            "@sec:greentic/{}/{}/{}/{}",
+            scope.env,
+            scope.tenant,
+            scope.team.unwrap_or_else(|| "_".to_string()),
+            spec.key.as_str()
         )
     }
 
@@ -239,7 +248,8 @@ impl AzureBackend {
         for spec in &self.plan.secrets {
             entries.push(format!(
                 "          {{ name: '{}', secretRef: '{}' }}",
-                spec.key, spec.key
+                spec.key.as_str(),
+                spec.key.as_str()
             ));
         }
 
@@ -354,10 +364,7 @@ impl ProviderBackend for AzureBackend {
 
 impl AzureBackend {
     fn deploy_base(&self) -> PathBuf {
-        PathBuf::from("deploy")
-            .join(self.config.provider.as_str())
-            .join(&self.config.tenant)
-            .join(&self.config.environment)
+        self.config.provider_output_dir()
     }
 
     fn manifest_path(&self, stage: &str) -> PathBuf {

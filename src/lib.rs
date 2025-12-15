@@ -19,6 +19,6 @@ pub use config::{Action, CliArgs, Command, DeployerConfig, OutputFormat, Provide
 pub use error::DeployerError;
 pub use plan::{
     ChannelContext, ComponentRole, DeploymentProfile, InferenceNotes, InfraPlan, MessagingContext,
-    PlanContext, PlannedComponent, SecretContext, Target, TelemetryContext,
+    PlanContext, PlannedComponent, Target, TelemetryContext,
 };
 pub use providers::{GeneratedFile, ProviderArtifacts, ProviderBackend};

@@ -4,6 +4,7 @@ use std::env;
 use serde::{Deserialize, Serialize};
 
 use greentic_types::deployment::DeploymentPlan;
+use greentic_types::secrets::{SecretRequirement, SecretScope};
 
 use crate::config::{DeployerConfig, Provider};
 
@@ -141,7 +142,7 @@ pub struct PlanContext {
     /// Channel ingress and OAuth hints.
     pub channels: Vec<ChannelContext>,
     /// Logical secrets referenced by the deployment.
-    pub secrets: Vec<SecretContext>,
+    pub secrets: Vec<SecretRequirement>,
     /// Deployment target hints (provider/strategy strings).
     pub deployment: DeploymentHints,
 }
@@ -187,13 +188,6 @@ pub struct ChannelContext {
     pub oauth_required: bool,
 }
 
-/// Secret metadata surfaced during apply/destroy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecretContext {
-    pub key: String,
-    pub scope: String,
-}
-
 /// Deployment hints used to resolve provider/strategy dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentHints {
@@ -208,7 +202,7 @@ pub fn build_telemetry_context(plan: &DeploymentPlan, config: &DeployerConfig) -
         .telemetry
         .as_ref()
         .and_then(|t| t.suggested_endpoint.clone())
-        .or_else(|| env::var("GREENTIC_OTLP_ENDPOINT").ok())
+        .or_else(|| config.telemetry_config().endpoint.clone())
         .or_else(|| env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok())
         .unwrap_or_else(|| "https://otel.greentic.ai".to_string());
 
@@ -256,15 +250,17 @@ pub fn build_channel_context(
         .collect()
 }
 
-/// Builds secret hints for manifest output.
-pub fn build_secret_context(plan: &DeploymentPlan) -> Vec<SecretContext> {
-    plan.secrets
-        .iter()
-        .map(|secret| SecretContext {
-            key: secret.key.clone(),
-            scope: secret.scope.clone(),
-        })
-        .collect()
+/// Resolves the scope for a requirement, defaulting to the plan's tenant/environment when absent.
+pub fn requirement_scope(
+    requirement: &SecretRequirement,
+    plan_env: &str,
+    plan_tenant: &str,
+) -> SecretScope {
+    requirement.scope.clone().unwrap_or_else(|| SecretScope {
+        env: plan_env.to_string(),
+        tenant: plan_tenant.to_string(),
+        team: None,
+    })
 }
 
 /// Builds messaging hints using tenant/environment heuristics.
@@ -299,7 +295,7 @@ pub fn assemble_plan(
     let telemetry = build_telemetry_context(&plan, config);
     let messaging = build_messaging_context(&plan);
     let channels = build_channel_context(&plan, config);
-    let secrets = build_secret_context(&plan);
+    let secrets = plan.secrets.clone();
     PlanContext {
         plan,
         target: deployment.target.clone(),

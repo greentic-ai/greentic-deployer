@@ -7,9 +7,10 @@ use tracing::info;
 
 use crate::config::{DeployerConfig, Provider};
 use crate::error::Result;
-use crate::plan::{PlanContext, SecretContext};
+use crate::plan::{PlanContext, requirement_scope};
 use crate::providers::{ApplyManifest, ProviderArtifacts, ProviderBackend, ResolvedSecret};
 use greentic_types::deployment::RunnerPlan;
+use greentic_types::secrets::SecretRequirement;
 
 fn runner_cpu_millis(runner: &RunnerPlan) -> u32 {
     runner
@@ -131,7 +132,7 @@ impl GcpBackend {
                 writeln!(
                     &mut docs,
                     "  {}: {}",
-                    spec.key,
+                    spec.key.as_str(),
                     self.secret_manager_path(spec)
                 )
                 .ok();
@@ -152,10 +153,15 @@ impl GcpBackend {
         docs
     }
 
-    fn secret_manager_path(&self, spec: &SecretContext) -> String {
+    fn secret_manager_path(&self, spec: &SecretRequirement) -> String {
+        let scope = requirement_scope(spec, &self.plan.plan.environment, &self.plan.plan.tenant);
+        let team = scope.team.clone().unwrap_or_else(|| "_".to_string());
         format!(
-            "projects/greentic/secrets/greentic-{}-{}-{}/versions/latest",
-            self.config.tenant, self.config.environment, spec.key
+            "projects/greentic/secrets/greentic-{}-{}-{}-{}/versions/latest",
+            scope.tenant,
+            scope.env,
+            team,
+            spec.key.as_str()
         )
     }
 
@@ -180,7 +186,7 @@ impl GcpBackend {
         for spec in &self.plan.secrets {
             entries.push(format!(
                 "            - name: {}\n              valueFrom:\n                secretKeyRef:\n                  secret: {}\n                  version: latest",
-                spec.key,
+                spec.key.as_str(),
                 self.secret_manager_path(spec)
             ));
         }
@@ -296,10 +302,7 @@ impl ProviderBackend for GcpBackend {
 
 impl GcpBackend {
     fn deploy_base(&self) -> PathBuf {
-        PathBuf::from("deploy")
-            .join(self.config.provider.as_str())
-            .join(&self.config.tenant)
-            .join(&self.config.environment)
+        self.config.provider_output_dir()
     }
 
     fn manifest_path(&self, stage: &str) -> PathBuf {

@@ -51,6 +51,7 @@ fn sample_component(id: &str, http_server: bool) -> ComponentManifest {
         operations: Vec::new(),
         config_schema: None,
         resources: Default::default(),
+        dev_flows: Default::default(),
     }
 }
 
@@ -182,6 +183,11 @@ fn default_config(pack_path: PathBuf) -> DeployerConfig {
         dry_run: false,
         iac_tool: IaCTool::Terraform,
         output: OutputFormat::Text,
+        greentic: greentic_config_types::GreenticConfig::default(),
+        provenance: greentic_config::ProvenanceMap::new(),
+        config_warnings: Vec::new(),
+        explain_config: false,
+        allow_remote_in_offline: false,
     }
 }
 

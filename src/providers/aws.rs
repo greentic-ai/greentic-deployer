@@ -9,8 +9,9 @@ use tracing::info;
 
 use crate::config::{DeployerConfig, Provider};
 use crate::error::Result;
-use crate::plan::{PlanContext, SecretContext};
+use crate::plan::PlanContext;
 use greentic_types::deployment::RunnerPlan;
+use greentic_types::secrets::SecretRequirement;
 
 const DEFAULT_CPU_MILLIS: u32 = 512;
 const DEFAULT_MEMORY_MB: u32 = 1024;
@@ -125,7 +126,7 @@ impl AwsBackend {
                     &mut buffer,
                     "variable \"{}\" {{\n  type = string\n  description = \"Secret identifier for {}\"\n}}\n",
                     variable,
-                    spec.key
+                    spec.key.as_str()
                 )
                 .ok();
             }
@@ -151,12 +152,12 @@ impl AwsBackend {
         }
     }
 
-    fn secret_variable_name(&self, spec: &SecretContext) -> String {
-        format!("{}_secret_id", Self::sanitized_name(&spec.key))
+    fn secret_variable_name(&self, spec: &SecretRequirement) -> String {
+        format!("{}_secret_id", Self::sanitized_name(spec.key.as_str()))
     }
 
-    fn secret_data_name(&self, spec: &SecretContext) -> String {
-        format!("secret_{}", Self::sanitized_name(&spec.key))
+    fn secret_data_name(&self, spec: &SecretRequirement) -> String {
+        format!("secret_{}", Self::sanitized_name(spec.key.as_str()))
     }
 
     fn runner_resource_name(&self, runner: &RunnerPlan) -> String {
@@ -212,7 +213,8 @@ impl AwsBackend {
             let data_name = self.secret_data_name(spec);
             entries.push(format!(
                 "    {{ \"name\": \"{}\", \"value\": data.aws_secretsmanager_secret_version.{}.secret_string }}",
-                spec.key, data_name
+                spec.key.as_str(),
+                data_name
             ));
         }
 
@@ -394,10 +396,7 @@ impl ProviderBackend for AwsBackend {
 
 impl AwsBackend {
     fn deploy_base(&self) -> PathBuf {
-        PathBuf::from("deploy")
-            .join(self.config.provider.as_str())
-            .join(&self.config.tenant)
-            .join(&self.config.environment)
+        self.config.provider_output_dir()
     }
 
     fn manifest_path(&self, stage: &str) -> PathBuf {

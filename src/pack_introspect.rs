@@ -8,11 +8,12 @@ use greentic_distributor_client::source::DistributorSource;
 use greentic_types::cbor::decode_pack_manifest;
 use greentic_types::component::ComponentManifest;
 use greentic_types::deployment::{
-    ChannelPlan, DeploymentPlan, MessagingPlan, RunnerPlan, SecretPlan, TelemetryPlan,
+    ChannelPlan, DeploymentPlan, MessagingPlan, RunnerPlan, TelemetryPlan,
 };
 use greentic_types::flow::FlowKind;
 use greentic_types::pack::PackRef;
 use greentic_types::pack_manifest::{PackFlowEntry, PackKind, PackManifest};
+use greentic_types::secrets::{SecretRequirement, SecretScope};
 use semver::Version;
 use serde_json::{Value as JsonValue, json};
 use tar::Archive;
@@ -221,7 +222,15 @@ impl DistributorSource for HttpPackSource {
             }
             match request.send() {
                 Ok(response) if response.status().is_success() => {
-                    return Ok(response.bytes()?.to_vec());
+                    let bytes = response
+                        .bytes()
+                        .map_err(|err| {
+                            greentic_distributor_client::error::DistributorError::Other(
+                                err.to_string(),
+                            )
+                        })?
+                        .to_vec();
+                    return Ok(bytes);
                 }
                 Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
                     return Err(greentic_distributor_client::error::DistributorError::NotFound);
@@ -328,7 +337,7 @@ fn plan_library(manifest: &PackManifest, config: &DeployerConfig) -> DeploymentP
         runners: Vec::new(),
         messaging: None,
         channels: Vec::new(),
-        secrets: collect_secret_requirements(manifest),
+        secrets: collect_secret_requirements(manifest, config),
         oauth: Vec::new(),
         telemetry: None,
         extra: JsonValue::Null,
@@ -338,7 +347,7 @@ fn plan_library(manifest: &PackManifest, config: &DeployerConfig) -> DeploymentP
 fn infer_base_deployment_plan(manifest: &PackManifest, config: &DeployerConfig) -> DeploymentPlan {
     let runners = build_runner_plan(manifest);
     let channels = build_channel_plan(manifest);
-    let secrets = collect_secret_requirements(manifest);
+    let secrets = collect_secret_requirements(manifest, config);
     let messaging = messaging_plan_if_needed(manifest, &channels);
     let telemetry = Some(TelemetryPlan {
         required: true,
@@ -439,19 +448,29 @@ fn build_channel_plan(manifest: &PackManifest) -> Vec<ChannelPlan> {
     channels
 }
 
-fn collect_secret_requirements(manifest: &PackManifest) -> Vec<SecretPlan> {
+fn collect_secret_requirements(
+    manifest: &PackManifest,
+    config: &DeployerConfig,
+) -> Vec<SecretRequirement> {
     let mut secrets = Vec::new();
     for component in components_for_deployment(manifest) {
         if let Some(spec) = component.capabilities.host.secrets.as_ref() {
-            for key in &spec.required {
-                if secrets.iter().any(|entry: &SecretPlan| entry.key == *key) {
+            for requirement in &spec.required {
+                let mut requirement = requirement.clone();
+                if requirement.scope.is_none() {
+                    requirement.scope = Some(SecretScope {
+                        env: config.environment.clone(),
+                        tenant: config.tenant.clone(),
+                        team: None,
+                    });
+                }
+
+                if secrets.iter().any(|entry: &SecretRequirement| {
+                    entry.key == requirement.key && entry.scope == requirement.scope
+                }) {
                     continue;
                 }
-                secrets.push(SecretPlan {
-                    key: key.clone(),
-                    required: true,
-                    scope: "tenant".to_string(),
-                });
+                secrets.push(requirement);
             }
         }
     }
@@ -833,6 +852,7 @@ mod tests {
             operations: Vec::new(),
             config_schema: None,
             resources: Default::default(),
+            dev_flows: Default::default(),
         }
     }
 
@@ -1128,6 +1148,11 @@ mod tests {
             dry_run: false,
             iac_tool: IaCTool::Terraform,
             output: OutputFormat::Text,
+            greentic: greentic_config_types::GreenticConfig::default(),
+            provenance: greentic_config::ProvenanceMap::new(),
+            config_warnings: Vec::new(),
+            explain_config: false,
+            allow_remote_in_offline: false,
         }
     }
 
@@ -1147,6 +1172,11 @@ mod tests {
             dry_run: false,
             iac_tool: IaCTool::Terraform,
             output: OutputFormat::Text,
+            greentic: greentic_config_types::GreenticConfig::default(),
+            provenance: greentic_config::ProvenanceMap::new(),
+            config_warnings: Vec::new(),
+            explain_config: false,
+            allow_remote_in_offline: false,
         }
     }
 }
