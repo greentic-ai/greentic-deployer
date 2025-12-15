@@ -187,6 +187,7 @@ fn default_config(pack_path: PathBuf) -> DeployerConfig {
         provenance: greentic_config::ProvenanceMap::new(),
         config_warnings: Vec::new(),
         explain_config: false,
+        explain_config_json: false,
         allow_remote_in_offline: false,
     }
 }

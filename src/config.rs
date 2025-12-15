@@ -150,6 +150,10 @@ pub struct GlobalArgs {
     #[arg(long, default_value_t = false)]
     pub explain_config: bool,
 
+    /// Print resolved configuration in JSON form (with provenance) and exit.
+    #[arg(long, default_value_t = false)]
+    pub explain_config_json: bool,
+
     /// Allow using remote endpoints even when ConnectionKind is Offline.
     #[arg(long, default_value_t = false)]
     pub allow_remote_in_offline: bool,
@@ -186,6 +190,7 @@ pub struct DeployerConfig {
     pub provenance: ProvenanceMap,
     pub config_warnings: Vec<String>,
     pub explain_config: bool,
+    pub explain_config_json: bool,
     pub allow_remote_in_offline: bool,
 }
 
@@ -199,14 +204,14 @@ impl DeployerConfig {
 
         let mut resolver = ConfigResolver::new();
         if let Some(path) = cli.global.config.as_ref() {
-            let root = if path.is_file() {
-                path.parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from("."))
-            } else {
-                path.clone()
-            };
-            resolver = resolver.with_project_root(root);
+            resolver = resolver.with_cli_overrides(greentic_config::CliOverrides {
+                config_path: Some(path.clone()),
+                env: None,
+                tenant: None,
+                team: None,
+                greentic_root: None,
+                state_dir: None,
+            });
         }
         let resolved = resolver
             .load()
@@ -262,6 +267,7 @@ impl DeployerConfig {
             provenance: resolved.provenance,
             config_warnings: resolved.warnings,
             explain_config: cli.global.explain_config,
+            explain_config_json: cli.global.explain_config_json,
             allow_remote_in_offline: cli.global.allow_remote_in_offline,
         })
     }
