@@ -183,7 +183,7 @@ fn build_http_distributor_source(config: &DeployerConfig) -> Result<Arc<dyn Dist
         ));
     }
 
-    let client = build_http_client(&config.greentic.network)?;
+    let client = build_http_client(&config.greentic.network, base_url)?;
     Ok(Arc::new(HttpPackSource::new(
         client,
         base_url.to_string(),
@@ -209,7 +209,7 @@ impl HttpPackSource {
     }
 }
 
-fn build_http_client(network: &NetworkConfig) -> Result<reqwest::blocking::Client> {
+fn build_http_client(network: &NetworkConfig, base_url: &str) -> Result<reqwest::blocking::Client> {
     let mut builder = reqwest::blocking::Client::builder();
 
     if let Some(proxy_url) = &network.proxy_url {
@@ -220,9 +220,15 @@ fn build_http_client(network: &NetworkConfig) -> Result<reqwest::blocking::Clien
     }
 
     builder = match network.tls_mode {
-        TlsMode::Disabled => builder
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true),
+        TlsMode::Disabled => {
+            if base_url.starts_with("https://") {
+                return Err(DeployerError::Config(
+                    "network.tls_mode=disabled is not allowed for https distributor_url; use http or enable TLS"
+                        .into(),
+                ));
+            }
+            builder
+        }
         TlsMode::System | TlsMode::Strict => builder,
     };
 
