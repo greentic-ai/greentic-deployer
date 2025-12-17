@@ -149,14 +149,12 @@ impl PlanContext {
     /// Returns a compact summary string for CLI output.
     pub fn summary(&self) -> String {
         format!(
-            "Plan for {} @ {} (target {}): {} runners, {} channels, {} secrets, {} oauth clients, {} components",
+            "Plan for {} @ {} (target {}): {} runners, {} channels, {} components",
             self.plan.tenant,
             self.plan.environment,
             self.target.as_str(),
             self.plan.runners.len(),
             self.plan.channels.len(),
-            self.secrets.len(),
-            self.plan.oauth.len(),
             self.components.len()
         )
     }
