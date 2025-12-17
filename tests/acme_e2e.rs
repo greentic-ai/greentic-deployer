@@ -117,6 +117,7 @@ fn sample_manifest() -> PackManifest {
         version: Version::new(0, 1, 0),
         kind: PackKind::Application,
         publisher: "greentic".to_string(),
+        secret_requirements: Vec::new(),
         components: vec![http_component, msg_component],
         flows,
         dependencies: vec![PackDependency {
@@ -183,7 +184,10 @@ fn default_config(pack_path: PathBuf) -> DeployerConfig {
         dry_run: false,
         iac_tool: IaCTool::Terraform,
         output: OutputFormat::Text,
-        greentic: greentic_config_types::GreenticConfig::default(),
+        greentic: greentic_config::ConfigResolver::new()
+            .load()
+            .expect("load default config")
+            .config,
         provenance: greentic_config::ProvenanceMap::new(),
         config_warnings: Vec::new(),
         explain_config: false,

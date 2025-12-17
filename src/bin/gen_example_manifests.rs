@@ -14,6 +14,7 @@ fn write_manifest(dir: &str, pack_id: &str) {
         version: Version::new(0, 1, 0),
         kind: PackKind::Application,
         publisher: "greentic".to_string(),
+        secret_requirements: Vec::new(),
         components: vec![ComponentManifest {
             id: ComponentId::try_from(format!("{pack_id}.component")).unwrap(),
             version: Version::new(0, 1, 0),

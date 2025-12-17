@@ -63,9 +63,9 @@ For Local/K8s targets, wire in a deployment pack + executor (or extend the provi
 ## Configuration
 
 - Configuration is resolved via `greentic-config` with precedence `CLI > env > project (.greentic/config.toml) > user (~/.config/greentic/config.toml) > defaults`. If you pass `--config <path>`, that file replaces project discovery; precedence becomes `CLI > env > explicit file > user > defaults`. Use `--config <path>` for an explicit file and `--explain-config`/`--explain-config-json` to print the resolved config/provenance.
-- `GREENTIC_BASE_DOMAIN` controls the base domain used when emitting OAuth redirect URLs (defaults to `deploy.greentic.ai`).
+- `deployer.base_domain` in config controls the domain used when emitting OAuth redirect URLs and channel ingress; defaults to `deploy.greentic.ai` via greentic-config.
 - OTLP tracing reads the endpoint from config; `OTEL_EXPORTER_OTLP_ENDPOINT` remains a fallback.
-- `GREENTIC_IAC_TOOL` overrides the IaC tool used when running `apply`/`destroy`. Accepts `tf`/`terraform` or `tofu`/`opentofu`. When unset the deployer prefers `tofu` (if available), falls back to `terraform`, and execution fails later if the binary is absent.
+- IaC tool selection comes from `--iac-tool` (Terraform/OpenTofu) or PATH auto-detection (prefers tofu).
 - When `connection` is set to `Offline` in config, remote pack/distributor access is blocked unless `--allow-remote-in-offline` is provided.
 
 ## Secrets & OAuth

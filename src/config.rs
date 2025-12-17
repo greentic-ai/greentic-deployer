@@ -1,8 +1,8 @@
-use std::env;
+use std::fs;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use greentic_config::{ConfigResolver, ProvenanceMap};
+use greentic_config::{ConfigFileFormat, ConfigLayer, ConfigResolver, ProvenanceMap};
 use greentic_config_types::{GreenticConfig, PathsConfig, TelemetryConfig};
 use greentic_types::ConnectionKind;
 use greentic_types::pack::PackRef;
@@ -131,7 +131,7 @@ pub struct ActionArgs {
     name = "greentic-deployer",
     version,
     about = "Automated multi-cloud deployment engine for Greentic packs.",
-    long_about = "Choose Terraform or OpenTofu via --iac-tool or GREENTIC_IAC_TOOL, or rely on PATH auto-detection (tofu takes precedence). Apply/destroy commands run terraform/tofu init/plan/apply or init/destroy inside deploy/<provider>/<tenant>/<env>."
+    long_about = "Choose Terraform or OpenTofu via --iac-tool, or rely on PATH auto-detection (tofu takes precedence). Apply/destroy commands run terraform/tofu init/plan/apply or init/destroy inside deploy/<provider>/<tenant>/<env>."
 )]
 pub struct CliArgs {
     #[command(flatten)]
@@ -143,19 +143,19 @@ pub struct CliArgs {
 #[derive(Debug, Args, Default)]
 pub struct GlobalArgs {
     /// Optional explicit config path (overrides project/user discovery).
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
     /// Print resolved configuration (with provenance) and exit.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, global = true)]
     pub explain_config: bool,
 
     /// Print resolved configuration in JSON form (with provenance) and exit.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, global = true)]
     pub explain_config_json: bool,
 
     /// Allow using remote endpoints even when ConnectionKind is Offline.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, global = true)]
     pub allow_remote_in_offline: bool,
 }
 
@@ -203,15 +203,8 @@ impl DeployerConfig {
         };
 
         let mut resolver = ConfigResolver::new();
-        if let Some(path) = cli.global.config.as_ref() {
-            resolver = resolver.with_cli_overrides(greentic_config::CliOverrides {
-                config_path: Some(path.clone()),
-                env: None,
-                tenant: None,
-                team: None,
-                greentic_root: None,
-                state_dir: None,
-            });
+        if let Some(layer) = load_explicit_config(cli.global.config.as_ref())? {
+            resolver = resolver.with_cli_overrides(layer);
         }
         let resolved = resolver
             .load()
@@ -231,15 +224,11 @@ impl DeployerConfig {
                 .or_else(|| Some(greentic.environment.env_id.to_string())),
         )?;
 
-        let iac_tool = resolve_iac_tool(args.iac_tool, env::var("GREENTIC_IAC_TOOL").ok())?;
+        let iac_tool = resolve_iac_tool(args.iac_tool, None)?;
         let pack_ref = build_pack_ref(&args)?;
 
-        let distributor_url = args
-            .distributor_url
-            .or_else(|| env::var("GREENTIC_DISTRIBUTOR_URL").ok());
-        let distributor_token = args
-            .distributor_token
-            .or_else(|| env::var("GREENTIC_DISTRIBUTOR_TOKEN").ok());
+        let distributor_url = args.distributor_url;
+        let distributor_token = args.distributor_token;
 
         validate_offline_policy(
             greentic.environment.connection.as_ref(),
@@ -292,6 +281,36 @@ impl DeployerConfig {
     }
 }
 
+fn load_explicit_config(path: Option<&PathBuf>) -> Result<Option<ConfigLayer>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+
+    let contents = fs::read_to_string(path).map_err(|err| {
+        DeployerError::Config(format!(
+            "failed to read config file {}: {err}",
+            path.display()
+        ))
+    })?;
+
+    let format = match path.extension().and_then(|s| s.to_str()) {
+        Some("json") => ConfigFileFormat::Json,
+        _ => ConfigFileFormat::Toml,
+    };
+
+    let layer = match format {
+        ConfigFileFormat::Toml => toml::from_str::<ConfigLayer>(&contents)
+            .map_err(|err| format!("toml parse error: {err}")),
+        ConfigFileFormat::Json => serde_json::from_str::<ConfigLayer>(&contents)
+            .map_err(|err| format!("json parse error: {err}")),
+    }
+    .map_err(|err| {
+        DeployerError::Config(format!("invalid config file {}: {err}", path.display()))
+    })?;
+
+    Ok(Some(layer))
+}
+
 fn build_pack_ref(args: &ActionArgs) -> Result<Option<PackRef>> {
     let Some(pack_id) = args.pack_id.as_ref() else {
         return Ok(None);
@@ -332,7 +351,10 @@ fn validate_offline_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::tempdir;
+
     fn base_args() -> Vec<&'static str> {
         vec![
             "greentic-deployer",
@@ -346,9 +368,35 @@ mod tests {
         ]
     }
 
+    fn write_config(dir: &Path) -> PathBuf {
+        let cfg = r#"
+[environment]
+env_id = "prod"
+connection = "offline"
+
+[paths]
+greentic_root = "."
+state_dir = ".greentic/state"
+cache_dir = ".greentic/cache"
+logs_dir = ".greentic/logs"
+
+[telemetry]
+enabled = false
+
+[network]
+tls_mode = "system"
+
+[secrets]
+kind = "none"
+"#;
+        let path = dir.join("config.toml");
+        fs::write(&path, cfg).expect("write config");
+        path
+    }
+
     #[test]
     fn defaults_to_dev_environment_when_missing() {
-        if env::var("GREENTIC_ENV").is_ok() {
+        if std::env::var("GREENTIC_ENV").is_ok() {
             eprintln!("GREENTIC_ENV set; skipping default environment test");
             return;
         }
@@ -396,5 +444,52 @@ mod tests {
         assert_eq!(pack_ref.oci_url, "dev.greentic.sample");
         assert_eq!(pack_ref.version.to_string(), "0.1.0");
         assert_eq!(pack_ref.digest, "sha256:deadbeef");
+    }
+
+    #[test]
+    fn explicit_config_file_overrides_default_env() {
+        let dir = tempdir().unwrap();
+        let cfg_path = write_config(dir.path());
+
+        let mut args = base_args();
+        args.push("--config");
+        args.push(cfg_path.to_str().unwrap());
+        let cli = CliArgs::parse_from(args);
+        let config = DeployerConfig::from_env_and_args(cli).expect("config builds");
+        assert_eq!(config.greentic.environment.env_id.to_string(), "prod");
+    }
+
+    #[test]
+    fn offline_connection_blocks_remote_pack_without_override() {
+        let dir = tempdir().unwrap();
+        let cfg_path = write_config(dir.path());
+
+        let args = vec![
+            "greentic-deployer",
+            "plan",
+            "--provider",
+            "aws",
+            "--tenant",
+            "acme",
+            "--pack",
+            dir.path().to_str().unwrap(),
+            "--pack-id",
+            "dev.greentic.sample",
+            "--pack-version",
+            "0.1.0",
+            "--pack-digest",
+            "sha256:deadbeef",
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "--distributor-url",
+            "https://distributor.greentic.ai",
+        ];
+
+        let cli = CliArgs::parse_from(&args);
+        let err = DeployerConfig::from_env_and_args(cli).unwrap_err();
+        assert!(
+            format!("{err}").contains("Offline"),
+            "expected offline validation error, got {err}"
+        );
     }
 }

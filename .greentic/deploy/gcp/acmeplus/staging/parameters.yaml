@@ -1,0 +1,4 @@
+secret_paths:
+  # no secrets defined in plan
+nats_admin_url: 'https://nats.staging.acmeplus.svc'
+telemetry_endpoint: 'https://otel.greentic.ai'

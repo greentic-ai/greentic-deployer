@@ -303,7 +303,10 @@ mod tests {
             dry_run: false,
             iac_tool: IaCTool::Terraform,
             output: crate::config::OutputFormat::Text,
-            greentic: greentic_config_types::GreenticConfig::default(),
+            greentic: greentic_config::ConfigResolver::new()
+                .load()
+                .expect("load default config")
+                .config,
             provenance: greentic_config::ProvenanceMap::new(),
             config_warnings: Vec::new(),
             explain_config: false,
@@ -332,6 +335,7 @@ mod tests {
             version: Version::new(0, 1, 0),
             kind: PackKind::Application,
             publisher: "greentic".to_string(),
+            secret_requirements: Vec::new(),
             components: vec![ComponentManifest {
                 id: ComponentId::try_from("dev.greentic.component").unwrap(),
                 version: Version::new(0, 1, 0),

@@ -1,7 +1,5 @@
-use std::collections::BTreeMap;
-use std::env;
-
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use greentic_types::deployment::DeploymentPlan;
 use greentic_types::secrets::{SecretRequirement, SecretScope};
@@ -203,7 +201,6 @@ pub fn build_telemetry_context(plan: &DeploymentPlan, config: &DeployerConfig) -
         .as_ref()
         .and_then(|t| t.suggested_endpoint.clone())
         .or_else(|| config.telemetry_config().endpoint.clone())
-        .or_else(|| env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok())
         .unwrap_or_else(|| "https://otel.greentic.ai".to_string());
 
     let mut resource_attributes = BTreeMap::new();
@@ -228,8 +225,13 @@ pub fn build_channel_context(
     plan: &DeploymentPlan,
     config: &DeployerConfig,
 ) -> Vec<ChannelContext> {
-    let base_domain =
-        env::var("GREENTIC_BASE_DOMAIN").unwrap_or_else(|_| "deploy.greentic.ai".to_string());
+    const DEFAULT_BASE_DOMAIN: &str = "deploy.greentic.ai";
+    let base_domain = config
+        .greentic
+        .deployer
+        .as_ref()
+        .and_then(|d| d.base_domain.as_deref())
+        .unwrap_or(DEFAULT_BASE_DOMAIN);
     plan.channels
         .iter()
         .map(|channel| {

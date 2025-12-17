@@ -2,9 +2,12 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
+use greentic_config_types::{NetworkConfig, TlsMode};
 use greentic_distributor_client::PackId;
 use greentic_distributor_client::source::DistributorSource;
+use greentic_types::ConnectionKind;
 use greentic_types::cbor::decode_pack_manifest;
 use greentic_types::component::ComponentManifest;
 use greentic_types::deployment::{
@@ -143,25 +146,19 @@ fn read_manifest_from_tar(path: &Path) -> Result<PackManifest> {
 }
 
 fn resolve_distributor_source(config: &DeployerConfig) -> Result<Arc<dyn DistributorSource>> {
-    DISTRIBUTOR_SOURCE
-        .get()
-        .cloned()
-        .or_else(|| {
-            build_http_distributor_source(
-                config
-                    .distributor_url
-                    .as_deref()
-                    .ok_or_else(|| DeployerError::Config("set --distributor-url when using --pack-id".into()))
-                    .ok()?,
-                config.distributor_token.as_deref(),
-            )
-        })
-        .ok_or_else(|| {
-            DeployerError::Config(
-                "no distributor source registered; either register one programmatically or set --distributor-url"
-                    .to_string(),
-            )
-        })
+    if let Some(source) = DISTRIBUTOR_SOURCE.get().cloned() {
+        return Ok(source);
+    }
+
+    build_http_distributor_source(config).map_err(|err| {
+        if matches!(err, DeployerError::Config(_) | DeployerError::OfflineDisallowed(_)) {
+            err
+        } else {
+            DeployerError::Config(format!(
+                "no distributor source registered; either register one programmatically or set --distributor-url ({err})"
+            ))
+        }
+    })
 }
 
 static DISTRIBUTOR_SOURCE: once_cell::sync::OnceCell<Arc<dyn DistributorSource>> =
@@ -172,13 +169,25 @@ pub fn set_distributor_source(source: Arc<dyn DistributorSource>) {
     let _ = DISTRIBUTOR_SOURCE.set(source);
 }
 
-fn build_http_distributor_source(
-    base_url: &str,
-    token: Option<&str>,
-) -> Option<Arc<dyn DistributorSource>> {
-    Some(Arc::new(HttpPackSource::new(
+fn build_http_distributor_source(config: &DeployerConfig) -> Result<Arc<dyn DistributorSource>> {
+    let base_url = config.distributor_url.as_deref().ok_or_else(|| {
+        DeployerError::Config("set --distributor-url when using --pack-id".into())
+    })?;
+
+    if matches!(
+        config.greentic.environment.connection,
+        Some(ConnectionKind::Offline)
+    ) {
+        return Err(DeployerError::OfflineDisallowed(
+            "connection is Offline but distributor URL was requested".into(),
+        ));
+    }
+
+    let client = build_http_client(&config.greentic.network)?;
+    Ok(Arc::new(HttpPackSource::new(
+        client,
         base_url.to_string(),
-        token.map(|s| s.to_string()),
+        config.distributor_token.clone(),
     )))
 }
 
@@ -190,10 +199,7 @@ struct HttpPackSource {
 }
 
 impl HttpPackSource {
-    fn new(base_url: String, token: Option<String>) -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .build()
-            .expect("build reqwest client");
+    fn new(client: reqwest::blocking::Client, base_url: String, token: Option<String>) -> Self {
         Self {
             client,
             base_url,
@@ -201,6 +207,37 @@ impl HttpPackSource {
             retries: 3,
         }
     }
+}
+
+fn build_http_client(network: &NetworkConfig) -> Result<reqwest::blocking::Client> {
+    let mut builder = reqwest::blocking::Client::builder();
+
+    if let Some(proxy_url) = &network.proxy_url {
+        let proxy = reqwest::Proxy::all(proxy_url).map_err(|err| {
+            DeployerError::Config(format!("invalid proxy URL {proxy_url}: {err}"))
+        })?;
+        builder = builder.proxy(proxy);
+    }
+
+    builder = match network.tls_mode {
+        TlsMode::Disabled => builder
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true),
+        TlsMode::System | TlsMode::Strict => builder,
+    };
+
+    if let Some(connect_ms) = network.connect_timeout_ms {
+        builder = builder.connect_timeout(Duration::from_millis(connect_ms));
+    }
+    if let Some(read_ms) = network.read_timeout_ms {
+        builder = builder.timeout(Duration::from_millis(read_ms));
+    }
+
+    builder.build().map_err(|err| {
+        DeployerError::Config(format!(
+            "failed to build HTTP client for distributor: {err}"
+        ))
+    })
 }
 
 impl DistributorSource for HttpPackSource {
@@ -920,6 +957,7 @@ mod tests {
             version: Version::new(0, 1, 0),
             kind: PackKind::Application,
             publisher: "greentic".to_string(),
+            secret_requirements: Vec::new(),
             components: vec![messaging_component, http_component],
             flows,
             dependencies: vec![PackDependency {
@@ -1148,7 +1186,10 @@ mod tests {
             dry_run: false,
             iac_tool: IaCTool::Terraform,
             output: OutputFormat::Text,
-            greentic: greentic_config_types::GreenticConfig::default(),
+            greentic: greentic_config::ConfigResolver::new()
+                .load()
+                .expect("load default config")
+                .config,
             provenance: greentic_config::ProvenanceMap::new(),
             config_warnings: Vec::new(),
             explain_config: false,
@@ -1173,7 +1214,10 @@ mod tests {
             dry_run: false,
             iac_tool: IaCTool::Terraform,
             output: OutputFormat::Text,
-            greentic: greentic_config_types::GreenticConfig::default(),
+            greentic: greentic_config::ConfigResolver::new()
+                .load()
+                .expect("load default config")
+                .config,
             provenance: greentic_config::ProvenanceMap::new(),
             config_warnings: Vec::new(),
             explain_config: false,
