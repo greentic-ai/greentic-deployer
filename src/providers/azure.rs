@@ -138,13 +138,21 @@ impl AzureBackend {
                 writeln!(&mut body, "  properties: {{").ok();
                 writeln!(&mut body, "    configuration: {{").ok();
                 body.push_str(&secrets_block);
+                if self.is_external_component(runner) {
+                    writeln!(
+                        &mut body,
+                        "      ingress: {{ external: true, targetPort: 8080, transport: 'auto' }}"
+                    )
+                    .ok();
+                }
                 writeln!(&mut body, "    }}").ok();
                 writeln!(&mut body, "    template: {{").ok();
+                let min = runner.replicas.max(1);
+                let max = (runner.replicas + 1).max(min);
                 writeln!(
                     &mut body,
                     "      scale: {{ minReplicas: {}, maxReplicas: {} }}",
-                    runner.replicas.max(1),
-                    runner.replicas.max(1)
+                    min, max
                 )
                 .ok();
                 writeln!(&mut body, "      containers: [").ok();
@@ -242,6 +250,18 @@ impl AzureBackend {
             entries.push(format!(
                 "          {{ name: 'OTEL_RESOURCE_ATTRIBUTES', value: '{}' }}",
                 Self::bicep_escape(&attrs)
+            ));
+        }
+        for channel in &self.plan.channels {
+            let var = format!(
+                "CHANNEL_{}_INGRESS",
+                Self::sanitize_name(&channel.name).to_ascii_uppercase()
+            );
+            let value = channel.ingress.join(",");
+            entries.push(format!(
+                "          {{ name: '{}', value: '{}' }}",
+                var,
+                Self::bicep_escape(&value)
             ));
         }
 

@@ -110,7 +110,17 @@ impl GcpBackend {
                 writeln!(
                     &mut docs,
                     "          maxInstanceCount: {}",
-                    runner.replicas.max(1)
+                    (runner.replicas + 1).max(1)
+                )
+                .ok();
+                writeln!(
+                    &mut docs,
+                    "          ingress: {}",
+                    if self.is_external_component(runner) {
+                        "INGRESS_TRAFFIC_ALL"
+                    } else {
+                        "INGRESS_TRAFFIC_INTERNAL_ONLY"
+                    }
                 )
                 .ok();
             }
@@ -180,6 +190,18 @@ impl GcpBackend {
             entries.push(format!(
                 "            - name: OTEL_RESOURCE_ATTRIBUTES\n              value: {}",
                 Self::yaml_quoted(&telemetry_attrs)
+            ));
+        }
+        for channel in &self.plan.channels {
+            let var = format!(
+                "CHANNEL_{}_INGRESS",
+                Self::sanitize_name(&channel.name).to_ascii_uppercase()
+            );
+            let value = channel.ingress.join(",");
+            entries.push(format!(
+                "            - name: {}\n              value: {}",
+                var,
+                Self::yaml_quoted(&value)
             ));
         }
 

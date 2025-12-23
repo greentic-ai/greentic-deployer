@@ -20,4 +20,5 @@ resources:
                 memory: 1024Mi
         scaling:
           minInstanceCount: 2
-          maxInstanceCount: 2
+          maxInstanceCount: 3
+          ingress: INGRESS_TRAFFIC_INTERNAL_ONLY

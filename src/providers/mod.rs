@@ -12,10 +12,14 @@ use greentic_types::secrets::{SecretRequirement, SecretScope};
 pub mod aws;
 pub mod azure;
 pub mod gcp;
+pub mod k8s;
+pub mod local;
 
 pub use aws::AwsBackend;
 pub use azure::AzureBackend;
 pub use gcp::GcpBackend;
+pub use k8s::K8sBackend;
+pub use local::LocalBackend;
 
 /// Contract for a generated artifact file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,11 +198,7 @@ pub fn create_backend(
         Provider::Aws => Ok(Box::new(AwsBackend::new(config.clone(), plan.clone()))),
         Provider::Azure => Ok(Box::new(AzureBackend::new(config.clone(), plan.clone()))),
         Provider::Gcp => Ok(Box::new(GcpBackend::new(config.clone(), plan.clone()))),
-        Provider::Local | Provider::K8s => {
-            Err(crate::error::DeployerError::DeploymentPackUnsupported {
-                provider: provider.as_str().to_string(),
-                strategy: plan.deployment.strategy.clone(),
-            })
-        }
+        Provider::Local => Ok(Box::new(LocalBackend::new(config.clone(), plan.clone()))),
+        Provider::K8s => Ok(Box::new(K8sBackend::new(config.clone(), plan.clone()))),
     }
 }

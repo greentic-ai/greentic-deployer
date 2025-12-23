@@ -21,7 +21,6 @@ use greentic_types::{ComponentId, FlowId, NodeId, PackId};
 use indexmap::IndexMap;
 use semver::Version;
 use tar::Builder;
-use tempfile::tempdir_in;
 
 fn sample_component(id: &str, http_server: bool) -> ComponentManifest {
     let host_caps = greentic_types::component::HostCapabilities {
@@ -128,6 +127,7 @@ fn sample_manifest() -> PackManifest {
         }],
         capabilities: Vec::new(),
         signatures: Default::default(),
+        bootstrap: None,
     }
 }
 
@@ -199,8 +199,11 @@ fn default_config(pack_path: PathBuf) -> DeployerConfig {
 #[test]
 fn builds_plan_from_tar_gtpack() {
     let manifest = sample_manifest();
-    let cwd = std::env::current_dir().expect("cwd");
-    let dir = tempdir_in(cwd).expect("temp dir");
+    let base = std::env::current_dir()
+        .expect("cwd")
+        .join("target/tmp-tests");
+    std::fs::create_dir_all(&base).expect("create tmp base");
+    let dir = tempfile::tempdir_in(base).expect("temp dir");
     let tar_path = dir.path().join("sample.gtpack");
     write_gtpack_tar(&manifest, &tar_path);
 
@@ -214,8 +217,11 @@ fn builds_plan_from_tar_gtpack() {
 #[test]
 fn builds_plan_from_directory_pack() {
     let manifest = sample_manifest();
-    let cwd = std::env::current_dir().expect("cwd");
-    let dir = tempdir_in(cwd).expect("temp dir");
+    let base = std::env::current_dir()
+        .expect("cwd")
+        .join("target/tmp-tests");
+    std::fs::create_dir_all(&base).expect("create tmp base");
+    let dir = tempfile::tempdir_in(base).expect("temp dir");
     write_directory_pack(&manifest, dir.path());
 
     let config = default_config(dir.path().to_path_buf());

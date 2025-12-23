@@ -167,6 +167,107 @@ pub enum Command {
     Apply(ActionArgs),
     /// Destroy resources created by apply.
     Destroy(ActionArgs),
+    /// Platform bootstrap commands (install/upgrade/status).
+    Platform(PlatformArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PlatformCommand {
+    /// Install the Greentic platform from a .gtpack.
+    Install(PlatformActionArgs),
+    /// Upgrade the Greentic platform from a .gtpack.
+    Upgrade(PlatformActionArgs),
+    /// Show bootstrap state/status.
+    Status,
+}
+
+#[derive(Debug, Args)]
+pub struct PlatformActionArgs {
+    /// Path to a platform .gtpack archive (or oci:// reference when network is allowed).
+    #[arg(long)]
+    pub pack: String,
+    /// Enable signature verification (warnings on missing signatures).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub verify: bool,
+    /// Fail when signatures are missing or invalid.
+    #[arg(long, default_value_t = false)]
+    pub strict_verify: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct PlatformArgs {
+    #[command(subcommand)]
+    pub command: PlatformCommand,
+    /// Path to bootstrap state file (defaults to /var/lib/greentic/bootstrap/state.json).
+    #[arg(
+        long,
+        global = true,
+        default_value = "/var/lib/greentic/bootstrap/state.json",
+        env = "GREENTIC_BOOTSTRAP_STATE"
+    )]
+    pub bootstrap_state: PathBuf,
+    /// Bootstrap state backend (file|k8s).
+    #[arg(long, global = true, value_enum, default_value = "file")]
+    pub bootstrap_state_backend: BootstrapStateBackend,
+    /// Kubernetes namespace for bootstrap state (when using k8s backend).
+    #[arg(long, global = true, default_value = "greentic-system")]
+    pub k8s_namespace: String,
+    /// Kubernetes ConfigMap/Secret name for bootstrap state (when using k8s backend).
+    #[arg(long, global = true, default_value = "greentic-bootstrap")]
+    pub k8s_state_name: String,
+    /// Interaction mode for bootstrap (cli|json|auto).
+    #[arg(long, global = true, value_enum, default_value = "auto")]
+    pub interaction: InteractionMode,
+    /// Explicitly allow listener-based adapters (HTTP/MQTT); defaults to off.
+    #[arg(long, global = true, default_value_t = false)]
+    pub allow_listeners: bool,
+    /// Allow network access for interaction adapters (off by default).
+    #[arg(long, global = true, default_value_t = false)]
+    pub allow_network: bool,
+    /// Comma-separated allowlist for outbound network targets (domains or CIDRs).
+    #[arg(long, global = true)]
+    pub net_allowlist: Option<String>,
+    /// Optional bind address for listener adapters.
+    #[arg(long, global = true)]
+    pub bind: Option<String>,
+    /// Force offline-only bootstrap (no network/remote fetches).
+    #[arg(long, global = true, default_value_t = false)]
+    pub offline_only: bool,
+    /// Secrets backend URI for bootstrap secret writes (e.g., file:/var/lib/greentic/secrets.db).
+    #[arg(
+        long,
+        global = true,
+        default_value = "file:/var/lib/greentic/secrets.db",
+        env = "GREENTIC_SECRETS_BACKEND"
+    )]
+    pub secrets_backend: String,
+    /// Answers JSON for non-interactive bootstrap (use @- for stdin).
+    #[arg(long, global = true)]
+    pub answers: Option<String>,
+    /// Output file to write redacted bootstrap output JSON.
+    #[arg(long, global = true)]
+    pub output: Option<PathBuf>,
+    /// Path to write applied config_patch JSON (defaults beside bootstrap state).
+    #[arg(long, global = true)]
+    pub config_out: Option<PathBuf>,
+    /// Interaction timeout in seconds (applies to HTTP/MQTT adapters).
+    #[arg(long, global = true, default_value_t = 30)]
+    pub interaction_timeout: u64,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionMode {
+    Auto,
+    Cli,
+    Json,
+    Http,
+    Mqtt,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapStateBackend {
+    File,
+    K8s,
 }
 
 /// Complete configuration used by the deployer.
@@ -200,6 +301,11 @@ impl DeployerConfig {
             Command::Plan(args) => (Action::Plan, args),
             Command::Apply(args) => (Action::Apply, args),
             Command::Destroy(args) => (Action::Destroy, args),
+            Command::Platform(_) => {
+                return Err(DeployerError::Config(
+                    "platform commands do not use DeployerConfig".into(),
+                ));
+            }
         };
 
         let mut resolver = ConfigResolver::new();

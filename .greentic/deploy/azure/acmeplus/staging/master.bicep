@@ -15,7 +15,7 @@ resource runnergreentic_acme_plus_component 'Microsoft.Web/containerApps@2023-08
       secrets: []
     }
     template: {
-      scale: { minReplicas: 2, maxReplicas: 2 }
+      scale: { minReplicas: 2, maxReplicas: 3 }
       containers: [
         {
           name: 'greentic_acme_plus_component'

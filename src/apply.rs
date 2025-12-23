@@ -4,7 +4,7 @@ use std::path::Path;
 
 use tracing::{info, info_span};
 
-use crate::config::{Action, DeployerConfig, OutputFormat};
+use crate::config::{Action, DeployerConfig, OutputFormat, Provider};
 use crate::deployment::{DeploymentTarget, execute_deployment_pack, resolve_dispatch};
 use crate::error::{DeployerError, Result};
 use crate::iac::{
@@ -74,6 +74,12 @@ pub async fn run_with_plan(
     let backend = create_backend(config.provider, &config, &plan)?;
     let artifacts = backend.plan().await?;
     write_artifacts(&config, &artifacts)?;
+    let has_iac_files = !artifacts.files.is_empty();
+    let runs_iac = has_iac_files
+        && matches!(
+            config.provider,
+            Provider::Aws | Provider::Azure | Provider::Gcp
+        );
 
     let deploy_dir = config.provider_output_dir();
 
@@ -110,7 +116,14 @@ pub async fn run_with_plan(
                     resolve_secrets(&secrets_client, &plan.secrets, &plan, &config).await?;
                 secrets_client.push_to_provider(&resolved).await?;
                 backend.apply(&artifacts, &resolved).await?;
-                run_iac_plan_apply(runner, config.iac_tool, &deploy_dir)?;
+                if runs_iac {
+                    run_iac_plan_apply(runner, config.iac_tool, &deploy_dir)?;
+                } else {
+                    info!(
+                        "Skipping IaC apply for provider={} (no IaC-capable artifacts)",
+                        config.provider.as_str()
+                    );
+                }
             }
             Ok(())
         }
@@ -131,7 +144,14 @@ pub async fn run_with_plan(
                     resolve_secrets(&secrets_client, &plan.secrets, &plan, &config).await?;
                 secrets_client.push_to_provider(&resolved).await?;
                 backend.destroy(&artifacts, &resolved).await?;
-                run_iac_destroy(runner, config.iac_tool, &deploy_dir)?;
+                if runs_iac {
+                    run_iac_destroy(runner, config.iac_tool, &deploy_dir)?;
+                } else {
+                    info!(
+                        "Skipping IaC destroy for provider={} (no IaC-capable artifacts)",
+                        config.provider.as_str()
+                    );
+                }
             }
             Ok(())
         }

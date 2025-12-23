@@ -117,6 +117,41 @@ impl AwsBackend {
             Self::escape_value(&self.plan.telemetry.otlp_endpoint)
         )
         .ok();
+        writeln!(
+            &mut buffer,
+            "variable \"subnet_ids\" {{\n  type = list(string)\n  description = \"Subnets for ECS tasks\"\n  default = []\n}}\n"
+        )
+        .ok();
+        writeln!(
+            &mut buffer,
+            "variable \"security_group_ids\" {{\n  type = list(string)\n  description = \"Security groups for ECS services\"\n  default = []\n}}\n"
+        )
+        .ok();
+        writeln!(
+            &mut buffer,
+            "variable \"vpc_id\" {{\n  type = string\n  description = \"VPC for default security group (used when security_group_ids is empty)\"\n  default = \"\"\n}}\n"
+        )
+        .ok();
+        writeln!(
+            &mut buffer,
+            "variable \"assign_public_ip\" {{\n  type = bool\n  default = false\n}}\n"
+        )
+        .ok();
+        writeln!(
+            &mut buffer,
+            "variable \"autoscaling_cpu_target\" {{\n  type = number\n  default = 70\n}}\n"
+        )
+        .ok();
+        writeln!(
+            &mut buffer,
+            "variable \"autoscaling_max_extra\" {{\n  type = number\n  default = 2\n  description = \"Max additional tasks above base replicas\"\n}}\n"
+        )
+        .ok();
+        writeln!(
+            &mut buffer,
+            "variable \"log_retention_days\" {{\n  type = number\n  default = 7\n}}\n"
+        )
+        .ok();
 
         if !self.plan.secrets.is_empty() {
             writeln!(&mut buffer, "# Secrets resolved via greentic-secrets").ok();
@@ -164,6 +199,15 @@ impl AwsBackend {
         format!("runner_{}", Self::sanitized_name(&runner.name))
     }
 
+    fn log_group_name(&self, runner: &RunnerPlan) -> String {
+        format!(
+            "/greentic/{}/{}/{}",
+            self.config.tenant,
+            self.config.environment,
+            Self::sanitized_name(&runner.name)
+        )
+    }
+
     fn secret_data_blocks(&self) -> String {
         if self.plan.secrets.is_empty() {
             return String::new();
@@ -208,6 +252,18 @@ impl AwsBackend {
                 Self::escape_value(&telemetry_attrs)
             ));
         }
+        for channel in &self.plan.channels {
+            let var = format!(
+                "CHANNEL_{}_INGRESS",
+                Self::sanitized_name(&channel.name).to_ascii_uppercase()
+            );
+            let value = channel.ingress.join(",");
+            entries.push(format!(
+                "    {{ \"name\": \"{}\", \"value\": \"{}\" }}",
+                var,
+                Self::escape_value(&value)
+            ));
+        }
 
         for spec in &self.plan.secrets {
             let data_name = self.secret_data_name(spec);
@@ -235,6 +291,16 @@ impl AwsBackend {
         writeln!(
             &mut block,
             "resource \"aws_ecs_cluster\" \"nats\" {{\n  name = local.nats_cluster\n}}\n"
+        )
+        .ok();
+        writeln!(
+            &mut block,
+            "locals {{\n  service_sg_ids = length(var.security_group_ids) > 0 ? var.security_group_ids : (var.vpc_id != \"\" && length(aws_security_group.greentic_default) > 0 ? [aws_security_group.greentic_default[0].id] : [])\n}}\n"
+        )
+        .ok();
+        writeln!(
+            &mut block,
+            "resource \"aws_security_group\" \"greentic_default\" {{\n  count = var.vpc_id != \"\" && length(var.security_group_ids) == 0 ? 1 : 0\n  name        = \"greentic-deployer\"\n  description = \"Greentic runner default egress\"\n  vpc_id      = var.vpc_id\n\n  egress {{\n    from_port   = 0\n    to_port     = 0\n    protocol    = \"-1\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n  }}\n}}\n"
         )
         .ok();
 
@@ -271,7 +337,14 @@ impl AwsBackend {
             )
             .ok();
             writeln!(&mut block, "{}", env_block).ok();
-            writeln!(&mut block, "  ]").ok();
+            writeln!(&mut block, "  ],").ok();
+            writeln!(
+                &mut block,
+                "  \"logConfiguration\": {{\n    \"logDriver\": \"awslogs\",\n    \"options\": {{\n      \"awslogs-group\": \"{}\",\n      \"awslogs-region\": var.aws_region,\n      \"awslogs-stream-prefix\": \"{}\"\n    }}\n  }}",
+                self.log_group_name(runner),
+                container_name
+            )
+            .ok();
             writeln!(&mut block, "}} ]").ok();
             writeln!(&mut block, "EOF\n}}\n").ok();
 
@@ -290,7 +363,46 @@ impl AwsBackend {
             )
             .ok();
             writeln!(&mut block, "  desired_count = {}", runner.replicas.max(1)).ok();
+            writeln!(&mut block, "  network_configuration {{").ok();
+            writeln!(
+                &mut block,
+                "    subnets = var.subnet_ids\n    security_groups = local.service_sg_ids\n    assign_public_ip = var.assign_public_ip"
+            )
+            .ok();
+            writeln!(&mut block, "  }}").ok();
             writeln!(&mut block, "}}\n").ok();
+
+            writeln!(
+            &mut block,
+            "resource \"aws_cloudwatch_log_group\" \"{}_logs\" {{\n  name = \"{}\"\n  retention_in_days = var.log_retention_days\n}}\n",
+            resource_name,
+            self.log_group_name(runner)
+        )
+        .ok();
+        }
+
+        for runner in &self.plan.plan.runners {
+            let resource_name = self.runner_resource_name(runner);
+            let container_name = Self::escape_value(&runner.name);
+            writeln!(
+            &mut block,
+            "resource \"aws_appautoscaling_target\" \"{}_as\" {{\n  max_capacity       = {} + var.autoscaling_max_extra\n  min_capacity       = {}\n  resource_id        = \"service/${{aws_ecs_cluster.nats.name}}/${{aws_ecs_service.{}_service.name}}\"\n  scalable_dimension = \"ecs:service:DesiredCount\"\n  service_namespace  = \"ecs\"\n}}\n",
+            resource_name,
+            runner.replicas.max(1),
+            runner.replicas.max(1),
+            resource_name
+        )
+        .ok();
+            writeln!(
+            &mut block,
+            "resource \"aws_appautoscaling_policy\" \"{}_cpu\" {{\n  name               = \"{}-cpu-policy\"\n  policy_type        = \"TargetTrackingScaling\"\n  resource_id        = aws_appautoscaling_target.{}_as.resource_id\n  scalable_dimension = aws_appautoscaling_target.{}_as.scalable_dimension\n  service_namespace  = aws_appautoscaling_target.{}_as.service_namespace\n\n  target_tracking_scaling_policy_configuration {{\n    predefined_metric_specification {{\n      predefined_metric_type = \"ECSServiceAverageCPUUtilization\"\n    }}\n    target_value = var.autoscaling_cpu_target\n  }}\n}}\n",
+            resource_name,
+            container_name,
+            resource_name,
+            resource_name,
+            resource_name
+        )
+        .ok();
         }
 
         block

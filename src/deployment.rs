@@ -215,11 +215,9 @@ mod tests {
     use greentic_types::pack_manifest::{PackKind, PackManifest};
     use greentic_types::{ComponentId, PackId};
     use semver::Version;
-    use std::env;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tempfile::tempdir_in;
 
     #[test]
     fn resolves_default_entry() {
@@ -328,7 +326,9 @@ mod tests {
 
     #[allow(deprecated)]
     fn write_test_pack() -> PathBuf {
-        let dir = tempdir_in(env::current_dir().expect("cwd")).expect("temp dir");
+        let base = env::current_dir().expect("cwd").join("target/tmp-tests");
+        std::fs::create_dir_all(&base).expect("create tmp base");
+        let dir = tempfile::tempdir_in(base).expect("temp dir");
         let manifest = PackManifest {
             schema_version: "pack-v1".to_string(),
             pack_id: PackId::try_from("dev.greentic.sample").unwrap(),
@@ -353,6 +353,7 @@ mod tests {
             dependencies: Vec::new(),
             capabilities: Vec::new(),
             signatures: Default::default(),
+            bootstrap: None,
         };
         let bytes = encode_pack_manifest(&manifest).expect("encode manifest");
         std::fs::write(dir.path().join("manifest.cbor"), bytes).expect("write manifest");

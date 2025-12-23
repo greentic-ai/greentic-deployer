@@ -145,6 +145,30 @@ fn read_manifest_from_tar(path: &Path) -> Result<PackManifest> {
     load_pack_manifest_from_bytes(&bytes)
 }
 
+/// Read a manifest directly from a `.gtpack` archive on disk.
+pub fn read_manifest_from_gtpack(path: &Path) -> Result<PackManifest> {
+    read_manifest_from_tar(path)
+}
+
+/// Read an arbitrary entry from a `.gtpack` archive.
+pub fn read_entry_from_gtpack(path: &Path, entry_path: &Path) -> Result<Vec<u8>> {
+    let file = File::open(path)?;
+    let mut archive = Archive::new(file);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if entry.path()?.as_ref() == entry_path {
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)?;
+            return Ok(buf);
+        }
+    }
+    Err(DeployerError::Pack(format!(
+        "entry {} not found in {}",
+        entry_path.display(),
+        path.display()
+    )))
+}
+
 fn resolve_distributor_source(config: &DeployerConfig) -> Result<Arc<dyn DistributorSource>> {
     if let Some(source) = DISTRIBUTOR_SOURCE.get().cloned() {
         return Ok(source);
@@ -868,7 +892,6 @@ mod tests {
     use std::io::Write;
     use std::str::FromStr;
     use tar::Builder;
-    use tempfile::tempdir_in;
 
     fn sample_component(id: &str, inbound_messaging: bool) -> ComponentManifest {
         let host_caps = HostCapabilities {
@@ -974,6 +997,7 @@ mod tests {
             }],
             capabilities: Vec::new(),
             signatures: Default::default(),
+            bootstrap: None,
         }
     }
 
@@ -1008,8 +1032,9 @@ mod tests {
             .expect("decode manifest");
         assert_eq!(from_bytes.pack_id, manifest.pack_id);
 
-        let cwd = env::current_dir().expect("cwd");
-        let dir = tempdir_in(cwd).expect("temp dir");
+        let base = env::current_dir().expect("cwd").join("target/tmp-tests");
+        std::fs::create_dir_all(&base).expect("create tmp base");
+        let dir = tempfile::tempdir_in(base).expect("temp dir");
         let manifest_path = dir.path().join("manifest.cbor");
         fs::write(&manifest_path, &encoded).expect("write manifest");
         fs::create_dir(dir.path().join("components")).expect("mkdir components");

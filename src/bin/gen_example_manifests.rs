@@ -32,6 +32,7 @@ fn write_manifest(dir: &str, pack_id: &str) {
         dependencies: Vec::new(),
         capabilities: Vec::new(),
         signatures: Default::default(),
+        bootstrap: None,
     };
     let bytes = encode_pack_manifest(&manifest).expect("encode manifest");
     let path = PathBuf::from(dir).join("manifest.cbor");
