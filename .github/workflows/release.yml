@@ -113,6 +113,8 @@ jobs:
     needs: [crate-publish, dist]
     if: needs.crate-publish.result == 'success' && needs.dist.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
