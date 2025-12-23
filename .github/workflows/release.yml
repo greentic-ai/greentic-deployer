@@ -34,7 +34,11 @@ jobs:
           if [ "${status:-0}" -ne 0 ]; then
             if echo "$publish_output" | grep -qi "already uploaded"; then
               echo "Version already published; skipping error."
-            else
-              exit ${status:-1}
+              exit 0
             fi
+            if echo "$publish_output" | grep -qi "already exists on crates.io index"; then
+              echo "Crate version already on crates.io; skipping publish error."
+              exit 0
+            fi
+            exit ${status:-1}
           fi

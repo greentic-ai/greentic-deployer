@@ -111,6 +111,7 @@
 - **Path:** `tests/platform_resolver.rs`
   - **Role:** Validates platform pack loading behavior.
   - **Key functionality:** Builds a temp gtpack, ensures manifest is read and digest computed; asserts missing pack errors and signature verification policies (warn/strict/invalid signature).
+- **CI/Release:** `.github/workflows/release.yml` skips failing the publish job when the crate version is already present on crates.io (matches “already uploaded” or “already exists on crates.io index”).
 - **Packaging:** `Cargo.toml` sets `package.metadata.binstall` so `cargo binstall greentic-deployer` fetches release tarballs from GitHub Releases (URL template `greentic-deployer-v{version}-{target}.tgz`).
 - **Path:** `tests/bootstrap_flow_resolution.rs`
   - **Role:** Ensures bootstrap flow resolution respects manifest hints and defaults.
