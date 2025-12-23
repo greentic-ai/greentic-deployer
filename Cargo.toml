@@ -11,6 +11,10 @@ documentation = "https://docs.greentic.ai/deployer"
 keywords = ["greentic", "deployer", "terraform", "opentofu"]
 categories = ["command-line-utilities", "development-tools"]
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/greentic-deployer-v{ version }-{ target }.tgz"
+bin-dir = "{ bin }{ binary-ext }"
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"

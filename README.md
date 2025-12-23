@@ -16,6 +16,23 @@
 cargo build -p greentic-deployer
 ```
 
+## Install
+
+From crates.io:
+
+```bash
+cargo install greentic-deployer
+```
+
+Prefer prebuilt artifacts?
+
+```bash
+cargo install cargo-binstall
+cargo binstall greentic-deployer
+```
+
+`cargo binstall greentic-deployer` downloads release tarballs for your platform so you don’t have to build from source.
+
 ## CLI
 
 ```
