@@ -97,6 +97,9 @@ jobs:
 
           mkdir -p "$STAGING"
           cp "$CARGO_TARGET_DIR/$TARGET/release/greentic-deployer${BIN_EXT}" "$STAGING/"
+          if [[ -f "$CARGO_TARGET_DIR/$TARGET/release/gen_example_manifests${BIN_EXT}" ]]; then
+            cp "$CARGO_TARGET_DIR/$TARGET/release/gen_example_manifests${BIN_EXT}" "$STAGING/"
+          fi
           cp README.md LICENSE "$STAGING/" || true
 
           tar czf "$STAGING.tgz" -C "$STAGING" .
