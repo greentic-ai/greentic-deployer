@@ -46,6 +46,8 @@ jobs:
   dist:
     name: Build release binaries (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     needs: crate-publish
     strategy:
         matrix:
