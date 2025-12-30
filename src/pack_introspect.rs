@@ -333,7 +333,7 @@ impl DistributorSource for HttpPackSource {
     }
 }
 
-fn read_manifest_from_directory(root: &Path) -> Result<PackManifest> {
+pub fn read_manifest_from_directory(root: &Path) -> Result<PackManifest> {
     let cbor = normalize_under_root(root, Path::new("manifest.cbor"))
         .map_err(|err| DeployerError::Pack(err.to_string()))?;
     if !cbor.exists() {
@@ -998,6 +998,7 @@ mod tests {
             capabilities: Vec::new(),
             signatures: Default::default(),
             bootstrap: None,
+            extensions: None,
         }
     }
 

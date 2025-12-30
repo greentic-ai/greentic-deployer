@@ -44,6 +44,7 @@ fn write_stub_gtpack(path: &PathBuf) {
             upgrade_flow: Some("platform_upgrade".into()),
             installer_component: Some("installer".into()),
         }),
+        extensions: None,
     };
 
     let encoded_manifest = encode_pack_manifest(&manifest).expect("encode manifest");

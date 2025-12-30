@@ -128,6 +128,7 @@ fn sample_manifest() -> PackManifest {
         capabilities: Vec::new(),
         signatures: Default::default(),
         bootstrap: None,
+        extensions: None,
     }
 }
 

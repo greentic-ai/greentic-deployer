@@ -336,6 +336,7 @@ mod tests {
             secret_requirements: Vec::new(),
             signatures: Default::default(),
             bootstrap: None,
+            extensions: None,
         };
         let encoded = greentic_types::cbor::encode_pack_manifest(&manifest).unwrap();
         let mut builder = Builder::new(Vec::new());

@@ -13,6 +13,7 @@ pub mod pack_introspect;
 pub mod path_safety;
 pub mod plan;
 pub mod platform;
+pub mod provider_onboarding;
 pub mod providers;
 pub mod secrets;
 pub mod telemetry;

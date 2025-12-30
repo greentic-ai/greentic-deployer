@@ -1,6 +1,6 @@
 [package]
 name = "greentic-deployer"
-version = "0.4.10"
+version = "0.4.11"
 edition = "2024"
 description = "Greentic pack deployer generating multi-cloud IaC + manifests"
 license = "MIT"
@@ -42,7 +42,11 @@ toml = "0.9"
 sha2 = "0.10"
 base64 = "0.22"
 ipnet = "2"
+jsonschema = "0.17"
+rpassword = "7"
+wasmtime = { version = "40", features = ["component-model"] }
 
 [dev-dependencies]
 tempfile = "3"
 indexmap = "2"
+wat = "1"

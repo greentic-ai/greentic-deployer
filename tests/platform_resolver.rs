@@ -58,6 +58,7 @@ fn sample_manifest() -> PackManifest {
         secret_requirements: Vec::new(),
         signatures: Default::default(),
         bootstrap: None,
+        extensions: None,
     }
 }
 

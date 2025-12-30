@@ -354,6 +354,7 @@ mod tests {
             capabilities: Vec::new(),
             signatures: Default::default(),
             bootstrap: None,
+            extensions: None,
         };
         let bytes = encode_pack_manifest(&manifest).expect("encode manifest");
         std::fs::write(dir.path().join("manifest.cbor"), bytes).expect("write manifest");

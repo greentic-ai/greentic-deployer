@@ -27,6 +27,7 @@ fn write_stub_pack(path: &PathBuf) {
             upgrade_flow: None,
             installer_component: None,
         }),
+        extensions: None,
     };
     let manifest_bytes =
         greentic_types::cbor::encode_pack_manifest(&manifest).expect("encode manifest");

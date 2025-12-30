@@ -169,6 +169,11 @@ pub enum Command {
     Destroy(ActionArgs),
     /// Platform bootstrap commands (install/upgrade/status).
     Platform(PlatformArgs),
+    /// Provider onboarding commands.
+    Provider {
+        #[command(subcommand)]
+        command: ProviderArgs,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -255,6 +260,37 @@ pub struct PlatformArgs {
     pub interaction_timeout: u64,
 }
 
+#[derive(Subcommand, Debug)]
+pub enum ProviderArgs {
+    /// Onboard a provider from a pack + provider extension metadata.
+    Onboard(ProviderOnboardArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProviderOnboardArgs {
+    /// Path to a provider pack (.gtpack) or unpacked directory.
+    #[arg(long)]
+    pub pack: PathBuf,
+    /// Provider type to select when multiple providers are present.
+    #[arg(long)]
+    pub provider_type: Option<String>,
+    /// Non-interactive config JSON path (skips prompts).
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    /// Optional output path for persisted provider config (defaults to state dir).
+    #[arg(long)]
+    pub config_out: Option<PathBuf>,
+    /// Fail when remote schemas/extension payloads are unpinned.
+    #[arg(long, default_value_t = false)]
+    pub strict: bool,
+    /// Provider instance identifier to persist (defaults to provider_type).
+    #[arg(long)]
+    pub instance_id: Option<String>,
+    /// Override state directory for persisted provider configs.
+    #[arg(long)]
+    pub state_dir: Option<PathBuf>,
+}
+
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InteractionMode {
     Auto,
@@ -301,9 +337,9 @@ impl DeployerConfig {
             Command::Plan(args) => (Action::Plan, args),
             Command::Apply(args) => (Action::Apply, args),
             Command::Destroy(args) => (Action::Destroy, args),
-            Command::Platform(_) => {
+            Command::Platform(_) | Command::Provider { .. } => {
                 return Err(DeployerError::Config(
-                    "platform commands do not use DeployerConfig".into(),
+                    "platform/provider commands do not use DeployerConfig".into(),
                 ));
             }
         };

@@ -21,19 +21,27 @@ use greentic_deployer::{
         state::{BootstrapState, ensure_upgrade_allowed, load_state_backend, save_state_backend},
     },
     config::{
-        BootstrapStateBackend, CliArgs, Command, DeployerConfig, InteractionMode,
-        PlatformActionArgs, PlatformArgs, PlatformCommand,
+        BootstrapStateBackend, CliArgs, Command, DeployerConfig, GlobalArgs, InteractionMode,
+        PlatformActionArgs, PlatformArgs, PlatformCommand, ProviderArgs,
     },
     platform::oci::resolve_oci_pack,
     platform::{self, VerificationPolicy},
+    provider_onboarding::{self, OnboardRequest},
 };
 
 #[tokio::main]
 async fn main() {
-    let cli = CliArgs::parse();
-    match cli.command {
+    let CliArgs { global, command } = CliArgs::parse();
+    match command {
         Command::Platform(args) => handle_platform(args),
-        _ => handle_standard(cli).await,
+        Command::Provider { command } => handle_provider(command, &global),
+        other => {
+            let cli = CliArgs {
+                global,
+                command: other,
+            };
+            handle_standard(cli).await
+        }
     }
 }
 
@@ -123,6 +131,40 @@ impl PlatformContext {
             state_backend: args.bootstrap_state_backend,
             k8s_namespace: args.k8s_namespace.clone(),
             k8s_state_name: args.k8s_state_name.clone(),
+        }
+    }
+}
+
+fn handle_provider(args: ProviderArgs, global: &GlobalArgs) {
+    match args {
+        ProviderArgs::Onboard(cmd) => {
+            let request = OnboardRequest {
+                pack_path: cmd.pack.clone(),
+                provider_type: cmd.provider_type.clone(),
+                config_path: cmd.config.clone(),
+                config_out: cmd.config_out.clone(),
+                strict: cmd.strict,
+                instance_id: cmd.instance_id.clone(),
+                state_dir: cmd.state_dir.clone(),
+                allow_remote_in_offline: global.allow_remote_in_offline,
+                greentic_config: global.config.clone(),
+            };
+            match provider_onboarding::onboard(request) {
+                Ok(outcome) => {
+                    println!(
+                        "provider onboarded: type={} instance={} pack={}@{} -> {}",
+                        outcome.provider_type,
+                        outcome.instance_id,
+                        outcome.pack_id,
+                        outcome.pack_version,
+                        outcome.config_path.display()
+                    );
+                }
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }

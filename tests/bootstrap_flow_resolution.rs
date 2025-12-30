@@ -52,6 +52,7 @@ fn manifest_with_bootstrap() -> PackManifest {
             upgrade_flow: Some("custom_upgrade".into()),
             installer_component: Some("custom_installer".into()),
         }),
+        extensions: None,
     }
 }
 
