@@ -12,6 +12,11 @@ jobs:
   local-check:
     runs-on: ubuntu-latest
     steps:
+      - name: Free disk space
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@v1
         with:
