@@ -152,6 +152,8 @@
 
 ## 3. Work In Progress, TODOs, and Stubs
 - No explicit TODO/FIXME markers in source.
+- `greentic-deployer-packgen` plus `ci/gen_packs.sh` now replace the old `scripts/gen_placeholders.sh`, generating provider packs via canonical CLIs and keeping `dist/*.gtpack` in sync with the placeholder flows/components.
+- The magical smoke harness described in `.codex/DEP-PR-01.md` (fixture pack + script) still needs implementation.
 - `src/deployment.rs`: Default dispatch table points to demo deployment packs; real environments are expected to override via env vars or register a `DeploymentExecutor`.
 - Local/K8s backends emit compose/k8s templates but still require deployment pack mappings or an executor to perform real deployments.
 - Platform commands are partially scaffolded: bootstrap flow runner parses installer output and applies config/secrets/state with rollback snapshots, but deploy plan execution is stubbed (no real platform deploy yet) and installer/wasm execution is not wired.

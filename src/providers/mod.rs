@@ -200,5 +200,6 @@ pub fn create_backend(
         Provider::Gcp => Ok(Box::new(GcpBackend::new(config.clone(), plan.clone()))),
         Provider::Local => Ok(Box::new(LocalBackend::new(config.clone(), plan.clone()))),
         Provider::K8s => Ok(Box::new(K8sBackend::new(config.clone(), plan.clone()))),
+        Provider::Generic => Ok(Box::new(LocalBackend::new(config.clone(), plan.clone()))),
     }
 }

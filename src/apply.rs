@@ -1,17 +1,22 @@
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tracing::{info, info_span};
 
+use serde::Serialize;
+
 use crate::config::{Action, DeployerConfig, OutputFormat, Provider};
-use crate::deployment::{DeploymentTarget, execute_deployment_pack, resolve_dispatch};
+use crate::deployment::{
+    DeploymentPackSelection, DeploymentTarget, execute_deployment_pack, resolve_deployment_pack,
+};
 use crate::error::{DeployerError, Result};
 use crate::iac::{
     DefaultIaCCommandRunner, IaCCommandRunner, IaCTool, dry_run_commands, run_iac_destroy,
     run_iac_plan_apply,
 };
 use crate::pack_introspect;
+use crate::placeholder;
 use crate::plan::{PlanContext, requirement_scope};
 use crate::providers::{ProviderArtifacts, ResolvedSecret, create_backend};
 use crate::secrets::{SecretFetchOutcome, SecretsContext};
@@ -46,7 +51,8 @@ pub async fn run_with_plan(
     plan: PlanContext,
     runner: &dyn IaCCommandRunner,
 ) -> Result<()> {
-    info!("built deployment plan: {}", plan.summary());
+    let plan_summary = plan.summary();
+    info!("built deployment plan: {}", plan_summary);
 
     let plan_target = DeploymentTarget {
         provider: plan.deployment.provider.clone(),
@@ -61,12 +67,45 @@ pub async fn run_with_plan(
             config.strategy
         );
     }
-    let dispatch = resolve_dispatch(&plan_target)?;
+    let selection = resolve_deployment_pack(&config, &plan_target)?;
     info!(
-        "resolved deployment pack {}::{} for provider={} strategy={}",
-        dispatch.pack_id, dispatch.flow_id, plan_target.provider, plan_target.strategy
+        provider = %plan_target.provider,
+        strategy = %plan_target.strategy,
+        pack_id = %selection.dispatch.pack_id,
+        flow_id = %selection.dispatch.flow_id,
+        pack_path = %selection.pack_path.display(),
+        origin = %selection.origin,
+        candidates = ?selection.candidates,
+        "resolved deployment pack"
     );
-    if execute_deployment_pack(&config, &plan, &dispatch).await? {
+    let dispatch = &selection.dispatch;
+
+    let deploy_dir = config.provider_output_dir();
+    fs::create_dir_all(&deploy_dir)?;
+    let runtime_artifacts = persist_runtime_artifacts(&config, &plan, &selection, &deploy_dir)?;
+    info!(
+        plan_path = %runtime_artifacts.plan.display(),
+        invoke_path = %runtime_artifacts.invoke.display(),
+        "persisted runtime invocation metadata"
+    );
+
+    if placeholder::emit_placeholder_artifacts(
+        &deploy_dir,
+        &config.tenant,
+        &config.environment,
+        &selection.dispatch.pack_id,
+        &selection.dispatch.flow_id,
+        &plan_summary,
+    )? {
+        info!(
+            pack_id = %selection.dispatch.pack_id,
+            flow_id = %selection.dispatch.flow_id,
+            "placeholder pack emitted deterministic artifacts"
+        );
+        return Ok(());
+    }
+
+    if execute_deployment_pack(&config, &plan, dispatch).await? {
         info!("deployment plan executed via deployment pack; skipping legacy provider backend");
         return Ok(());
     }
@@ -80,8 +119,6 @@ pub async fn run_with_plan(
             config.provider,
             Provider::Aws | Provider::Azure | Provider::Gcp
         );
-
-    let deploy_dir = config.provider_output_dir();
 
     let render_text = config.action != Action::Plan || matches!(config.output, OutputFormat::Text);
     if render_text {
@@ -184,6 +221,139 @@ fn write_artifacts(config: &DeployerConfig, artifacts: &ProviderArtifacts) -> Re
         fs::write(&target, &file.contents)?;
     }
 
+    Ok(())
+}
+
+struct RuntimeArtifacts {
+    plan: PathBuf,
+    invoke: PathBuf,
+}
+
+fn persist_runtime_artifacts(
+    config: &DeployerConfig,
+    plan: &PlanContext,
+    selection: &DeploymentPackSelection,
+    deploy_dir: &Path,
+) -> Result<RuntimeArtifacts> {
+    let runtime_dir = config
+        .greentic
+        .paths
+        .state_dir
+        .join("runtime")
+        .join(&config.tenant)
+        .join(&config.environment);
+    fs::create_dir_all(&runtime_dir)?;
+
+    let plan_path = runtime_dir.join("plan.json");
+    let plan_file = fs::File::create(&plan_path)?;
+    serde_json::to_writer_pretty(plan_file, plan)?;
+
+    let invocation = RuntimeInvocation {
+        provider: config.provider.as_str().to_string(),
+        strategy: config.strategy.clone(),
+        tenant: config.tenant.clone(),
+        environment: config.environment.clone(),
+        output_dir: deploy_dir.display().to_string(),
+        plan_path: plan_path.display().to_string(),
+        pack_id: selection.dispatch.pack_id.clone(),
+        flow_id: selection.dispatch.flow_id.clone(),
+        pack_path: selection.pack_path.display().to_string(),
+    };
+    let invoke_path = runtime_dir.join("invoke.json");
+    let invoke_file = fs::File::create(&invoke_path)?;
+    serde_json::to_writer_pretty(invoke_file, &invocation)?;
+
+    write_runner_diagnostics(config, deploy_dir, selection, &plan_path)?;
+
+    Ok(RuntimeArtifacts {
+        plan: plan_path,
+        invoke: invoke_path,
+    })
+}
+
+#[derive(Serialize)]
+struct RuntimeInvocation {
+    provider: String,
+    strategy: String,
+    tenant: String,
+    environment: String,
+    output_dir: String,
+    plan_path: String,
+    pack_id: String,
+    flow_id: String,
+    pack_path: String,
+}
+
+#[derive(Serialize)]
+struct DeployerInvocation {
+    pack_id: String,
+    flow_id: String,
+    pack_path: String,
+    output_dir: String,
+    runner_cmd: Vec<String>,
+    runner_env: Vec<(String, String)>,
+}
+
+fn write_runner_diagnostics(
+    config: &DeployerConfig,
+    deploy_dir: &Path,
+    selection: &DeploymentPackSelection,
+    plan_path: &Path,
+) -> Result<()> {
+    let runner_cmd = vec![
+        "greentic-runner".to_string(),
+        "--pack".to_string(),
+        selection.pack_path.display().to_string(),
+        "--flow".to_string(),
+        selection.dispatch.flow_id.clone(),
+        "--plan".to_string(),
+        plan_path.display().to_string(),
+        "--output".to_string(),
+        deploy_dir.display().to_string(),
+    ];
+
+    let runner_env = vec![
+        (
+            "GREENTIC_PROVIDER".to_string(),
+            config.provider.as_str().to_string(),
+        ),
+        ("GREENTIC_STRATEGY".to_string(), config.strategy.clone()),
+        ("GREENTIC_TENANT".to_string(), config.tenant.clone()),
+        (
+            "GREENTIC_ENVIRONMENT".to_string(),
+            config.environment.clone(),
+        ),
+        (
+            "GREENTIC_DEPLOYMENT_PACK_ID".to_string(),
+            selection.dispatch.pack_id.clone(),
+        ),
+        (
+            "GREENTIC_DEPLOYMENT_FLOW_ID".to_string(),
+            selection.dispatch.flow_id.clone(),
+        ),
+    ];
+
+    let diag = DeployerInvocation {
+        pack_id: selection.dispatch.pack_id.clone(),
+        flow_id: selection.dispatch.flow_id.clone(),
+        pack_path: selection.pack_path.display().to_string(),
+        output_dir: deploy_dir.display().to_string(),
+        runner_cmd: runner_cmd.clone(),
+        runner_env: runner_env.clone(),
+    };
+
+    let diag_path = deploy_dir.join("._deployer_invocation.json");
+    let diag_file = fs::File::create(&diag_path)?;
+    serde_json::to_writer_pretty(diag_file, &diag)?;
+
+    let mut doc = String::from("Runner command:\n");
+    doc.push_str(&runner_cmd.join(" "));
+    doc.push('\n');
+    doc.push_str("Environment:\n");
+    for (key, value) in runner_env {
+        doc.push_str(&format!("{key}={value}\n"));
+    }
+    fs::write(deploy_dir.join("._runner_cmd.txt"), doc)?;
     Ok(())
 }
 

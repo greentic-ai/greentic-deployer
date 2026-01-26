@@ -83,6 +83,7 @@ impl From<Provider> for Target {
             Provider::Azure => Target::Azure,
             Provider::Gcp => Target::Gcp,
             Provider::K8s => Target::K8s,
+            Provider::Generic => Target::Local,
         }
     }
 }

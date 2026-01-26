@@ -38,6 +38,7 @@ pub enum Provider {
     Azure,
     Gcp,
     K8s,
+    Generic,
 }
 
 impl Provider {
@@ -48,6 +49,7 @@ impl Provider {
             Provider::Azure => "azure",
             Provider::Gcp => "gcp",
             Provider::K8s => "k8s",
+            Provider::Generic => "generic",
         }
     }
 }
@@ -64,7 +66,7 @@ pub enum OutputFormat {
 /// Per-command configuration helpers.
 #[derive(Debug, Args)]
 pub struct ActionArgs {
-    /// Deployment target (local|aws|azure|gcp|k8s).
+    /// Deployment target (local|aws|azure|gcp|k8s|generic).
     #[arg(long, value_enum)]
     pub provider: Provider,
 
@@ -83,6 +85,18 @@ pub struct ActionArgs {
     /// Path to a .greentic-pack archive or a pack directory.
     #[arg(long)]
     pub pack: PathBuf,
+
+    /// Directory containing deployment pack sources (directories with manifests).
+    #[arg(long, default_value = "providers/deployer")]
+    pub providers_dir: PathBuf,
+
+    /// Directory containing `.gtpack` archives.
+    #[arg(long, default_value = "packs")]
+    pub packs_dir: PathBuf,
+
+    /// Explicit deployment pack file or directory to use (bypasses discovery).
+    #[arg(long)]
+    pub provider_pack: Option<PathBuf>,
 
     /// Optional pack identifier to resolve from a distributor/registry.
     #[arg(long)]
@@ -315,6 +329,9 @@ pub struct DeployerConfig {
     pub tenant: String,
     pub environment: String,
     pub pack_path: PathBuf,
+    pub providers_dir: PathBuf,
+    pub packs_dir: PathBuf,
+    pub provider_pack: Option<PathBuf>,
     pub pack_ref: Option<PackRef>,
     pub distributor_url: Option<String>,
     pub distributor_token: Option<String>,
@@ -386,6 +403,9 @@ impl DeployerConfig {
             tenant: args.tenant,
             environment,
             pack_path: args.pack,
+            providers_dir: args.providers_dir,
+            packs_dir: args.packs_dir,
+            provider_pack: args.provider_pack,
             pack_ref,
             distributor_url,
             distributor_token,

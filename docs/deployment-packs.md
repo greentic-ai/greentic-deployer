@@ -65,3 +65,14 @@ For the YGTC flow authoring format and schema notes, see `docs/flow-authoring.md
 
 - The HTTP fetcher is intentionally minimal. If your distributor API differs, register a custom `DistributorSource` via `set_distributor_source` before calling `build_plan`.
 - `reqwest` is used in blocking mode by default; swap in an async source if needed.
+
+# Placeholder pack pipeline
+
+`greentic-deployer` now exposes a deterministic pipeline backed by `greentic-deployer-packgen`:
+
+1. `ci/gen_packs.sh` runs `greentic-deployer-packgen generate --provider <name>` for every placeholder provider (`aws`, `azure`, `gcp`, `k8s`, `local`, `generic`). Packgen orchestrates the canonical CLIs (`greentic-pack new/add-extension/build/doctor`, `greentic-flow new/doctor`, optionally `greentic-component` tooling) so every pack is scaffolded, validated, and emitted as `dist/greentic.demo.deploy.<provider>.gtpack`.
+2. `ci/smoke_deployer.sh` exercises every placeholder pack with `plan` + `apply --dry-run`, then inspects `.greentic/state/deploy/<provider>/<tenant>/<environment>` for `._deployer_invocation.json` and `._runner_cmd.txt` to surface the resolved `(pack_id, flow_id)` and runner command.
+3. `ci/local_check.sh` bundles fmt/clippy/tests/doc checks, installs the greentic CLIs via `cargo binstall`, runs `ci/gen_packs.sh`, and re-runs `greentic-pack doctor` plus the smoke harness so the ABI and diagnostics stay locked to real packs.
+4. `.github/workflows/ci.yml` drives the same steps through the `local-check`, `build`, `doctor`, and `smoke` jobs so the `publish` job for tags only runs after every pack has been generated, doctored, and smoke-tested.
+
+Keeping this pipeline green ensures every placeholder pack shipped via GHCR is CLI-built, doctored, and validated by the smoke harness with deterministic logs.

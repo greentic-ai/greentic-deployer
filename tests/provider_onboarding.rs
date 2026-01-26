@@ -1,7 +1,7 @@
 use greentic_deployer::provider_onboarding::{self, OnboardRequest};
 use greentic_types::cbor::encode_pack_manifest;
 use greentic_types::component::{ComponentCapabilities, ComponentManifest, ComponentProfiles};
-use greentic_types::pack_manifest::{ExtensionRef, PackKind, PackManifest};
+use greentic_types::pack_manifest::{ExtensionInline, ExtensionRef, PackKind, PackManifest};
 use greentic_types::{
     ComponentId, PackId, ProviderDecl, ProviderExtensionInline, ProviderRuntimeRef,
 };
@@ -36,6 +36,7 @@ fn onboard_dummy_provider_pack() {
             },
             docs_ref: None,
         }],
+        additional_fields: BTreeMap::new(),
     };
     extensions.insert(
         "greentic.ext.provider".into(),
@@ -44,7 +45,7 @@ fn onboard_dummy_provider_pack() {
             version: "1.0.0".into(),
             digest: None,
             location: None,
-            inline: Some(serde_json::to_value(providers).unwrap()),
+            inline: Some(ExtensionInline::Provider(providers)),
         },
     );
 

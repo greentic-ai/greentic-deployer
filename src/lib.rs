@@ -11,6 +11,7 @@ pub mod error;
 pub mod iac;
 pub mod pack_introspect;
 pub mod path_safety;
+pub mod placeholder;
 pub mod plan;
 pub mod platform;
 pub mod provider_onboarding;

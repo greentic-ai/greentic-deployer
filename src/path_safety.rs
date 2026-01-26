@@ -9,15 +9,18 @@ pub fn normalize_under_root(root: &Path, candidate: &Path) -> Result<PathBuf> {
         anyhow::bail!("absolute paths are not allowed: {}", candidate.display());
     }
 
-    let joined = root.join(candidate);
+    let root_canon = root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+    let joined = root_canon.join(candidate);
     let canon = joined
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", joined.display()))?;
 
-    if !canon.starts_with(root) {
+    if !canon.starts_with(&root_canon) {
         anyhow::bail!(
             "path escapes root ({}): {}",
-            root.display(),
+            root_canon.display(),
             canon.display()
         );
     }

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use greentic_config::ConfigResolver;
 use greentic_config_types::{ConnectionKind, GreenticConfig, NetworkConfig};
-use greentic_types::pack_manifest::{ExtensionRef, PackManifest};
+use greentic_types::pack_manifest::{ExtensionInline, ExtensionRef, PackManifest};
 use greentic_types::{PackId, ProviderDecl, ProviderExtensionInline};
 use jsonschema::JSONSchema;
 use semver::Version;
@@ -222,7 +222,12 @@ fn resolve_extension_payload(
     network: &NetworkConfig,
 ) -> Result<ProviderExtensionInline> {
     if let Some(inline) = &extension.inline {
-        return serde_json::from_value(inline.clone()).map_err(DeployerError::Json);
+        return match inline {
+            ExtensionInline::Provider(provider_inline) => Ok(provider_inline.clone()),
+            ExtensionInline::Other(value) => {
+                serde_json::from_value(value.clone()).map_err(DeployerError::Json)
+            }
+        };
     }
 
     let location = extension.location.as_deref().ok_or_else(|| {

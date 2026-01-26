@@ -1,11 +1,15 @@
 use std::collections::HashMap;
 use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::config::DeployerConfig;
 use crate::error::{DeployerError, Result};
+use crate::pack_introspect::{read_manifest_from_directory, read_manifest_from_gtpack};
 use crate::plan::PlanContext;
 use async_trait::async_trait;
+use greentic_types::pack_manifest::PackManifest;
 use once_cell::sync::Lazy;
 
 /// Logical deployment target keyed by provider + strategy.
@@ -20,6 +24,16 @@ pub struct DeploymentTarget {
 pub struct DeploymentDispatch {
     pub pack_id: String,
     pub flow_id: String,
+}
+
+/// Resolved deployment pack selection including discovered manifest.
+#[derive(Debug)]
+pub struct DeploymentPackSelection {
+    pub dispatch: DeploymentDispatch,
+    pub pack_path: PathBuf,
+    pub manifest: PackManifest,
+    pub origin: String,
+    pub candidates: Vec<String>,
 }
 
 /// Built-in placeholder defaults. Real packs should replace these entries later.
@@ -93,6 +107,22 @@ pub fn resolve_dispatch(target: &DeploymentTarget) -> Result<DeploymentDispatch>
     resolve_dispatch_with_env(target, |key| env::var(key).ok())
 }
 
+pub fn resolve_deployment_pack(
+    config: &DeployerConfig,
+    target: &DeploymentTarget,
+) -> Result<DeploymentPackSelection> {
+    let dispatch = resolve_dispatch(target)?;
+    let discovery = find_pack_for_dispatch(config, target, &dispatch)?;
+    ensure_flow_available(&dispatch, &discovery.manifest)?;
+    Ok(DeploymentPackSelection {
+        dispatch,
+        pack_path: discovery.pack_path,
+        manifest: discovery.manifest,
+        origin: discovery.origin,
+        candidates: discovery.candidates,
+    })
+}
+
 fn resolve_dispatch_with_env<F>(target: &DeploymentTarget, get_env: F) -> Result<DeploymentDispatch>
 where
     F: Fn(&str) -> Option<String>,
@@ -119,11 +149,22 @@ fn env_override<F>(target: &DeploymentTarget, get_env: &F) -> Result<Option<Depl
 where
     F: Fn(&str) -> Option<String>,
 {
-    let prefix = format!(
+    let strategy_prefix = format!(
         "DEPLOY_TARGET_{}_{}",
         sanitize_key(&target.provider),
         sanitize_key(&target.strategy)
     );
+    if let Some(dispatch) = env_override_with_prefix(&strategy_prefix, get_env)? {
+        return Ok(Some(dispatch));
+    }
+    let provider_prefix = format!("DEPLOY_TARGET_{}", sanitize_key(&target.provider));
+    env_override_with_prefix(&provider_prefix, get_env)
+}
+
+fn env_override_with_prefix<F>(prefix: &str, get_env: &F) -> Result<Option<DeploymentDispatch>>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let pack_key = format!("{prefix}_PACK_ID");
     let flow_key = format!("{prefix}_FLOW_ID");
     let pack = get_env(&pack_key);
@@ -135,6 +176,182 @@ where
             "Incomplete deployment mapping overrides. Both {pack_key} and {flow_key} must be set."
         ))),
     }
+}
+
+struct SearchPath {
+    label: &'static str,
+    path: PathBuf,
+}
+
+struct PackDiscovery {
+    pack_path: PathBuf,
+    manifest: PackManifest,
+    origin: String,
+    candidates: Vec<String>,
+}
+
+fn find_pack_for_dispatch(
+    config: &DeployerConfig,
+    target: &DeploymentTarget,
+    dispatch: &DeploymentDispatch,
+) -> Result<PackDiscovery> {
+    if let Some(ref override_path) = config.provider_pack {
+        let manifest = load_manifest(override_path)?;
+        let actual = manifest.pack_id.to_string();
+        if actual != dispatch.pack_id {
+            return Err(DeployerError::Config(format!(
+                "explicit deployment pack {} contains pack_id {} (expected {})",
+                override_path.display(),
+                actual,
+                dispatch.pack_id
+            )));
+        }
+        return Ok(PackDiscovery {
+            pack_path: override_path.clone(),
+            manifest,
+            origin: format!("override -> {}", override_path.display()),
+            candidates: vec![format!("{} (override {})", actual, override_path.display())],
+        });
+    }
+
+    if let Some((direct_path, manifest)) =
+        resolve_direct_pack_path(config, target).and_then(|direct_path| {
+            if !direct_path.exists() {
+                return None;
+            }
+            match load_manifest(&direct_path) {
+                Ok(manifest) if manifest.pack_id.to_string() == dispatch.pack_id => {
+                    Some((direct_path, manifest))
+                }
+                _ => None,
+            }
+        })
+    {
+        let candidate_display = direct_path.display().to_string();
+        let entry = format!("{} ({})", manifest.pack_id, candidate_display);
+        return Ok(PackDiscovery {
+            pack_path: direct_path.clone(),
+            manifest,
+            origin: format!("providers-dir -> {}", candidate_display),
+            candidates: vec![entry],
+        });
+    }
+
+    let search_paths = build_search_paths(config);
+    let mut candidates = Vec::new();
+    for search in &search_paths {
+        for candidate in gather_candidates(&search.path) {
+            if let Ok(manifest) = load_manifest(&candidate) {
+                let entry = format!("{} ({})", manifest.pack_id, candidate.display());
+                candidates.push(entry.clone());
+                if manifest.pack_id.to_string() == dispatch.pack_id {
+                    let candidate_display = candidate.display().to_string();
+                    let pack_path = candidate.clone();
+                    return Ok(PackDiscovery {
+                        pack_path,
+                        manifest,
+                        origin: format!("{} -> {}", search.label, candidate_display),
+                        candidates,
+                    });
+                }
+            }
+        }
+    }
+
+    let summary = build_search_summary(&search_paths);
+    Err(DeployerError::Config(format!(
+        "Deployment pack {} not found; searched {} (candidates: {})",
+        dispatch.pack_id,
+        summary,
+        if candidates.is_empty() {
+            "none".into()
+        } else {
+            candidates.join("; ")
+        }
+    )))
+}
+
+fn ensure_flow_available(dispatch: &DeploymentDispatch, manifest: &PackManifest) -> Result<()> {
+    let available: Vec<String> = manifest
+        .flows
+        .iter()
+        .map(|entry| entry.id.to_string())
+        .collect();
+    if available.iter().any(|flow| flow == &dispatch.flow_id) {
+        return Ok(());
+    }
+
+    Err(DeployerError::Config(format!(
+        "Flow {} not found in {} (available flows: {})",
+        dispatch.flow_id,
+        dispatch.pack_id,
+        if available.is_empty() {
+            "none".into()
+        } else {
+            available.join(", ")
+        }
+    )))
+}
+
+fn build_search_paths(config: &DeployerConfig) -> Vec<SearchPath> {
+    vec![
+        SearchPath {
+            label: "providers-dir",
+            path: config.providers_dir.clone(),
+        },
+        SearchPath {
+            label: "packs-dir",
+            path: config.packs_dir.clone(),
+        },
+        SearchPath {
+            label: "dist",
+            path: PathBuf::from("dist"),
+        },
+        SearchPath {
+            label: "examples",
+            path: PathBuf::from("examples"),
+        },
+    ]
+}
+
+fn resolve_direct_pack_path(config: &DeployerConfig, target: &DeploymentTarget) -> Option<PathBuf> {
+    let pack_path = config.providers_dir.join(&target.provider);
+    if pack_path.exists() {
+        Some(pack_path)
+    } else {
+        None
+    }
+}
+
+fn gather_candidates(path: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let candidate = entry.path();
+            if candidate.is_dir()
+                || candidate.extension().and_then(|ext| ext.to_str()) == Some("gtpack")
+            {
+                candidates.push(candidate);
+            }
+        }
+    }
+    candidates
+}
+
+fn load_manifest(path: &Path) -> Result<PackManifest> {
+    if path.is_dir() {
+        read_manifest_from_directory(path)
+    } else {
+        read_manifest_from_gtpack(path)
+    }
+}
+
+fn build_search_summary(paths: &[SearchPath]) -> String {
+    paths
+        .iter()
+        .map(|entry| format!("{} ({})", entry.label, entry.path.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn sanitize_key(input: &str) -> String {
@@ -247,6 +464,22 @@ mod tests {
     }
 
     #[test]
+    fn honors_provider_only_override() {
+        let target = DeploymentTarget {
+            provider: "aws".into(),
+            strategy: "serverless".into(),
+        };
+        let dispatch = resolve_dispatch_with_env(&target, |key| match key {
+            "DEPLOY_TARGET_AWS_PACK_ID" => Some("provider.pack".into()),
+            "DEPLOY_TARGET_AWS_FLOW_ID" => Some("provider_flow".into()),
+            _ => None,
+        })
+        .expect("provider fallback");
+        assert_eq!(dispatch.pack_id, "provider.pack");
+        assert_eq!(dispatch.flow_id, "provider_flow");
+    }
+
+    #[test]
     fn errors_when_override_incomplete() {
         let target = DeploymentTarget {
             provider: "aws".into(),
@@ -293,6 +526,9 @@ mod tests {
             tenant: "acme".into(),
             environment: "staging".into(),
             pack_path,
+            providers_dir: PathBuf::from("providers/deployer"),
+            packs_dir: PathBuf::from("packs"),
+            provider_pack: None,
             pack_ref: None,
             distributor_url: None,
             distributor_token: None,
